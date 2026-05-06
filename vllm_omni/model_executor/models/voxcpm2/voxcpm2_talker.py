@@ -49,6 +49,50 @@ _ENABLE_PROFILING = os.environ.get("VOXCPM2_PROFILE", "0") == "1"
 _ACTIVE_STATE_LEAK_WARN_MIN = 512
 
 
+def _resolve_current_omni_platform_device() -> torch.device | None:
+    try:
+        from vllm_omni.platforms import current_omni_platform
+    except ImportError:
+        return None
+
+    try:
+        device = current_omni_platform.get_torch_device()
+    except (AttributeError, NotImplementedError):
+        return None
+    if device is None:
+        return None
+    return torch.device(device)
+
+
+def _resolve_runtime_device(vllm_config: VllmConfig | None) -> torch.device:
+    platform_device = _resolve_current_omni_platform_device()
+    if platform_device is not None:
+        return platform_device
+
+    device = getattr(getattr(vllm_config, "device_config", None), "device", None)
+    if isinstance(device, torch.device):
+        return device
+    if device:
+        return torch.device(device)
+    return torch.device("cpu")
+
+
+def _clear_device_cache(device: torch.device) -> None:
+    backend = getattr(torch, device.type, None)
+    empty_cache = getattr(backend, "empty_cache", None)
+    if callable(empty_cache):
+        empty_cache()
+
+
+def _runtime_flags_for_device(device: torch.device) -> dict[str, bool]:
+    is_cuda = device.type == "cuda"
+    return {
+        "enable_cuda_graph": is_cuda,
+        "enable_torch_compile": is_cuda,
+        "compile_vae": is_cuda,
+    }
+
+
 def is_cjk_char(c: str) -> bool:
     """Check if a character is a CJK ideograph."""
     cp = ord(c)
