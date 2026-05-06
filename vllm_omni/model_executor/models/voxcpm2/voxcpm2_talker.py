@@ -246,10 +246,11 @@ class _CapturedGraph:
 
 
 class _PerfTimer:
-    __slots__ = ("_enabled", "_timers", "_counts", "_starts", "_pairs")
+    __slots__ = ("_enabled", "_timers", "_counts", "_starts", "_pairs", "_device")
 
-    def __init__(self, enabled: bool = False):
+    def __init__(self, enabled: bool = False, device: torch.device | None = None):
         self._enabled = enabled
+        self._device = device or torch.device("cuda")
         self._timers: dict[str, float] = {}
         self._counts: dict[str, int] = {}
         self._starts: dict[str, torch.cuda.Event] = {}
@@ -463,9 +464,9 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
         model_path = vllm_config.model_config.model
         VoxCPM = import_voxcpm2_core()
         native = VoxCPM.from_pretrained(model_path, load_denoiser=False, optimize=False)
-        self._tts: nn.Module = native.tts_model.to("cuda")
+        self._device = _resolve_runtime_device(vllm_config)
+        self._tts: nn.Module = native.tts_model.to(self._device)
         self._side_dtype = self._tts.fusion_concat_proj.weight.dtype
-        self._device = "cuda"
         self._patch_size = self._tts.patch_size
         self._feat_dim = self._tts.feat_dim
         self._sample_rate = getattr(self.config, "sample_rate", 48000)
@@ -477,7 +478,7 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
         self._tts.base_lm = None
         del self._tts.residual_lm
         self._tts.residual_lm = None
-        torch.cuda.empty_cache()
+        _clear_device_cache(self._device)
 
         self._inference_timesteps = 10
         self._cfg_value = 2.0
@@ -486,17 +487,18 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
         # for sliding-window streaming decode. 12 matches the nanovllm reference
         # implementation and covers the longest VAE decoder receptive field.
         self._n_decode_pad_frames = 12
-        self._enable_torch_compile = True
-        self._compile_vae = True
+        runtime_flags = _runtime_flags_for_device(self._device)
+        self._enable_torch_compile = runtime_flags["enable_torch_compile"]
+        self._compile_vae = runtime_flags["compile_vae"]
         self._max_decode_steps = 2000
         self._max_batch_size = getattr(vllm_config.scheduler_config, "max_num_seqs", 4)
 
         # Speaker cache for ref_audio_feat across requests
         self._speaker_cache = get_speaker_cache()
 
-        self._perf = _PerfTimer(enabled=_ENABLE_PROFILING)
+        self._perf = _PerfTimer(enabled=_ENABLE_PROFILING, device=self._device)
         self._cfm_buffers: _CFMBufferManager | None = None
-        self._enable_cuda_graph = True
+        self._enable_cuda_graph = runtime_flags["enable_cuda_graph"]
         self._scaffold_graphs: dict[int, _CapturedGraph] = {}
         self._residual_graphs: dict[int, _CapturedGraph] = {}
         self._max_cached_graphs = self._max_batch_size
