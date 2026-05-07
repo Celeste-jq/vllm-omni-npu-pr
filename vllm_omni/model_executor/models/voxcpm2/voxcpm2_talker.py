@@ -739,7 +739,24 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
         tts = self.tts
         return tts.stop_head(tts.stop_actn(tts.stop_proj(lm_h)))
 
+    def _can_use_cuda_graph(
+        self,
+        *,
+        graph_ready: bool,
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None,
+    ) -> bool:
+        return (
+            self._device.type == "cuda"
+            and self._enable_cuda_graph
+            and graph_ready
+            and intermediate_tensors is None
+            and inputs_embeds is not None
+        )
+
     def _get_cuda_graph_pool(self) -> tuple:
+        if self._device.type != "cuda":
+            raise RuntimeError("CUDA Graph is only available on CUDA devices")
         if self._cuda_graph_pool is None:
             self._cuda_graph_pool = torch.cuda.graph_pool_handle()
         return self._cuda_graph_pool
@@ -848,8 +865,10 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
         if num_decode > 0:
             self._cuda_graph_warmup_steps += 1
 
-        can_use_graph = (
-            self._enable_cuda_graph and graph_ready and intermediate_tensors is None and inputs_embeds is not None
+        can_use_graph = self._can_use_cuda_graph(
+            graph_ready=graph_ready,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
         )
 
         if can_use_graph and is_all_decode and num_reqs <= self._max_cached_graphs:

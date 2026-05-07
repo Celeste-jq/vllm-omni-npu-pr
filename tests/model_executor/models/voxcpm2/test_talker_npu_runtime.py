@@ -191,3 +191,37 @@ def test_perf_timer_on_npu_uses_device_sync_without_cuda_events(monkeypatch) -> 
 
     assert "decode_step" in summary
     assert sync_calls
+
+
+def _make_bare_talker_for_runtime() -> tk.VoxCPM2TalkerForConditionalGeneration:
+    talker = tk.VoxCPM2TalkerForConditionalGeneration.__new__(tk.VoxCPM2TalkerForConditionalGeneration)
+    talker._device = torch.device("npu")
+    talker._enable_cuda_graph = True
+    talker._cuda_graph_pool = None
+    return talker
+
+
+def test_can_use_cuda_graph_is_false_on_npu_even_if_flag_is_true() -> None:
+    talker = _make_bare_talker_for_runtime()
+
+    assert (
+        talker._can_use_cuda_graph(
+            graph_ready=True,
+            intermediate_tensors=None,
+            inputs_embeds=torch.zeros(1, 1),
+        )
+        is False
+    )
+
+
+def test_get_cuda_graph_pool_rejects_npu_before_torch_cuda(monkeypatch) -> None:
+    class ForbiddenCuda:
+        @staticmethod
+        def graph_pool_handle():
+            raise AssertionError("cuda graph pool must not be touched on npu")
+
+    monkeypatch.setattr(tk.torch, "cuda", ForbiddenCuda, raising=True)
+    talker = _make_bare_talker_for_runtime()
+
+    with pytest.raises(RuntimeError, match="CUDA Graph is only available on CUDA"):
+        talker._get_cuda_graph_pool()
