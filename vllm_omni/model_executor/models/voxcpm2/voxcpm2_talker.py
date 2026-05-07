@@ -84,6 +84,13 @@ def _clear_device_cache(device: torch.device) -> None:
         empty_cache()
 
 
+def _synchronize_device(device: torch.device) -> None:
+    backend = getattr(torch, device.type, None)
+    synchronize = getattr(backend, "synchronize", None)
+    if callable(synchronize):
+        synchronize()
+
+
 def _runtime_flags_for_device(device: torch.device) -> dict[str, bool]:
     is_cuda = device.type == "cuda"
     return {
@@ -246,39 +253,62 @@ class _CapturedGraph:
 
 
 class _PerfTimer:
-    __slots__ = ("_enabled", "_timers", "_counts", "_starts", "_pairs", "_device")
+    __slots__ = (
+        "_device",
+        "_enabled",
+        "_timers",
+        "_counts",
+        "_event_starts",
+        "_event_pairs",
+        "_wall_starts",
+    )
 
     def __init__(self, enabled: bool = False, device: torch.device | None = None):
-        self._enabled = enabled
         self._device = device or torch.device("cuda")
+        self._enabled = enabled
         self._timers: dict[str, float] = {}
         self._counts: dict[str, int] = {}
-        self._starts: dict[str, torch.cuda.Event] = {}
-        self._pairs: list[tuple[str, torch.cuda.Event, torch.cuda.Event]] = []
+        self._event_starts: dict[str, Any] = {}
+        self._event_pairs: list[tuple[str, Any, Any]] = []
+        self._wall_starts: dict[str, float] = {}
 
     def start(self, name: str) -> None:
         if not self._enabled:
             return
-        evt = torch.cuda.Event(enable_timing=True)
-        evt.record()
-        self._starts[name] = evt
+        if self._device.type == "cuda":
+            evt = torch.cuda.Event(enable_timing=True)
+            evt.record()
+            self._event_starts[name] = evt
+            return
+        _synchronize_device(self._device)
+        self._wall_starts[name] = time.perf_counter()
 
     def stop(self, name: str) -> None:
-        if not self._enabled or name not in self._starts:
+        if not self._enabled:
             return
-        start_evt = self._starts.pop(name)
-        end_evt = torch.cuda.Event(enable_timing=True)
-        end_evt.record()
-        self._pairs.append((name, start_evt, end_evt))
+        if self._device.type == "cuda":
+            if name not in self._event_starts:
+                return
+            start_evt = self._event_starts.pop(name)
+            end_evt = torch.cuda.Event(enable_timing=True)
+            end_evt.record()
+            self._event_pairs.append((name, start_evt, end_evt))
+            return
+        start = self._wall_starts.pop(name, None)
+        if start is None:
+            return
+        _synchronize_device(self._device)
+        self._timers[name] = self._timers.get(name, 0.0) + (time.perf_counter() - start) * 1000.0
+        self._counts[name] = self._counts.get(name, 0) + 1
 
     def _resolve(self) -> None:
-        if not self._pairs:
+        if not self._event_pairs:
             return
         torch.cuda.synchronize()
-        for name, s, e in self._pairs:
+        for name, s, e in self._event_pairs:
             self._timers[name] = self._timers.get(name, 0.0) + s.elapsed_time(e)
             self._counts[name] = self._counts.get(name, 0) + 1
-        self._pairs.clear()
+        self._event_pairs.clear()
 
     def breakdown(self) -> str:
         if not self._enabled:
@@ -294,15 +324,17 @@ class _PerfTimer:
         ]
         for name in sorted(self._timers):
             t, c = self._timers[name], self._counts[name]
-            lines.append(f"{name:<30} | {t:>10.2f} | {t / total * 100:>5.1f}% | {c:>5} | {t / c:>8.3f}")
+            pct = t / total * 100 if total else 0.0
+            lines.append(f"{name:<30} | {t:>10.2f} | {pct:>5.1f}% | {c:>5} | {t / c:>8.3f}")
         lines.append(f"{'TOTAL':<30} | {total:>10.2f} |")
         return "\n".join(lines)
 
     def reset(self) -> None:
         self._timers.clear()
         self._counts.clear()
-        self._starts.clear()
-        self._pairs.clear()
+        self._event_starts.clear()
+        self._event_pairs.clear()
+        self._wall_starts.clear()
 
 
 # ===================================================================

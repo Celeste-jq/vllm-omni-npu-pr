@@ -162,3 +162,32 @@ def test_talker_constructor_moves_native_tts_to_resolved_npu(monkeypatch) -> Non
     assert talker._tts.base_lm is None
     assert talker._tts.residual_lm is None
     assert talker.residual_model.loaded_from_native is True
+
+
+def test_perf_timer_on_npu_uses_device_sync_without_cuda_events(monkeypatch) -> None:
+    sync_calls: list[str] = []
+
+    class ForbiddenCuda:
+        @staticmethod
+        def Event(*args, **kwargs):
+            raise AssertionError("cuda Event must not be constructed for npu profiling")
+
+        @staticmethod
+        def synchronize():
+            raise AssertionError("cuda synchronize must not be called for npu profiling")
+
+    monkeypatch.setattr(tk.torch, "cuda", ForbiddenCuda, raising=True)
+    monkeypatch.setattr(
+        tk.torch,
+        "npu",
+        SimpleNamespace(synchronize=lambda: sync_calls.append("npu")),
+        raising=False,
+    )
+
+    timer = tk._PerfTimer(enabled=True, device=torch.device("npu"))
+    timer.start("decode_step")
+    timer.stop("decode_step")
+    summary = timer.breakdown()
+
+    assert "decode_step" in summary
+    assert sync_calls
