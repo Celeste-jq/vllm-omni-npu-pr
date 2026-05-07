@@ -450,6 +450,12 @@ Single-stage native AR TTS at 48 kHz.
 ```bash
 vllm serve openbmb/VoxCPM2 --omni --host 0.0.0.0 --port 8000
 ```
+For NPU:
+```bash
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+ASCEND_RT_VISIBLE_DEVICES=0 \
+vllm serve openbmb/VoxCPM2 --omni --host 0.0.0.0 --port 8000
+```
 Deploy config auto-loads from `vllm_omni/deploy/voxcpm2.yaml`. Pass `--deploy-config <path>` to override or `--stage-N-<field> <value>` for per-stage runtime tweaks.
 
 ### Sending requests

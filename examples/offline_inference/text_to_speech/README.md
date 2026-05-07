@@ -379,6 +379,18 @@ python examples/offline_inference/text_to_speech/voxcpm2/end2end.py \
     --text "Hello, this is a VoxCPM2 demo."
 ```
 
+### NPU
+```bash
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+ASCEND_RT_VISIBLE_DEVICES=0 \
+python examples/offline_inference/text_to_speech/voxcpm2/end2end.py \
+    --model openbmb/VoxCPM2 \
+    --text "Hello, this is a VoxCPM2 demo running on NPU."
+```
+
+VoxCPM2 uses the same deploy config on CUDA and NPU. CUDA keeps the
+talker-local CUDA Graph optimization; NPU runs the talker side path eagerly.
+
 ### Voice cloning
 Pass a reference audio for isolated cloning, or both `--ref-audio` + `--ref-text` for prompt continuation:
 ```bash
