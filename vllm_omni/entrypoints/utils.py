@@ -21,6 +21,10 @@ logger = init_logger(__name__)
 _DIFFUSERS_CLASS_TO_CONFIG: dict[str, str] = {
     "GlmImagePipeline": "glm_image",
 }
+_ARCHITECTURE_TO_CONFIG: dict[str, str] = {
+    "voxcpm2": "voxcpm2",
+    "VoxCPM2TalkerForConditionalGeneration": "voxcpm2",
+}
 
 
 def inject_omni_kv_config(stage: Any, omni_conn_cfg: dict[str, Any], omni_from: str, omni_to: str) -> None:
@@ -219,6 +223,24 @@ def resolve_model_config_path(model: str) -> str:
                 config_dict = get_hf_file_to_dict("config.json", model, revision=None)
                 if config_dict and "model_type" in config_dict:
                     model_type = config_dict["model_type"]
+                elif config_dict and "architecture" in config_dict:
+                    model_type = _ARCHITECTURE_TO_CONFIG.get(config_dict["architecture"])
+                    if model_type is None:
+                        raise ValueError(
+                            f"config.json found but unsupported 'architecture' "
+                            f"{config_dict['architecture']!r} for model: {model}"
+                        )
+                elif config_dict and "architectures" in config_dict:
+                    model_type = None
+                    for arch in config_dict["architectures"]:
+                        model_type = _ARCHITECTURE_TO_CONFIG.get(arch)
+                        if model_type is not None:
+                            break
+                    if model_type is None:
+                        raise ValueError(
+                            f"config.json found but unsupported 'architectures' "
+                            f"{config_dict['architectures']!r} for model: {model}"
+                        )
                 else:
                     raise ValueError(f"config.json found but missing 'model_type' for model: {model}")
             except Exception as e:

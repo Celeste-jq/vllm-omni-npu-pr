@@ -234,6 +234,7 @@ class StageConfigFactory:
         "bagel": "bagel",
         "qwen3_tts": "qwen3_tts",
         "voxtral_tts": "voxtral_tts",
+        "voxcpm2": "voxcpm2",
         "mimo_audio": "mimo_audio",
         "glm-image": "glm_image",
         "cosyvoice3": "cosyvoice3",
