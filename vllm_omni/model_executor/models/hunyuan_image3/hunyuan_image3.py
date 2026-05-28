@@ -1422,9 +1422,8 @@ class HunyuanImage3RotaryEmbedding(nn.Module):
         # Interleave: [y*θ₀, x*θ₁, y*θ₂, x*θ₃, ...]
         freqs = torch.stack([y_freqs, x_freqs], dim=-1).reshape(num_tokens, -1)
 
-        emb = torch.cat([freqs, freqs], dim=-1)
-        cos = emb.cos().to(dtype)
-        sin = emb.sin().to(dtype)
+        cos = freqs.cos().to(dtype)
+        sin = freqs.sin().to(dtype)
 
         query = query.view(num_tokens, -1, self.head_dim)
         key = key.view(num_tokens, -1, self.head_dim)
