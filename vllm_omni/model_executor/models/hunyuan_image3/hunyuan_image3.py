@@ -93,6 +93,7 @@ from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
+from vllm_omni.diffusion.layers.rope import RotaryEmbedding as DiffusionRotaryEmbedding
 from vllm_omni.diffusion.models.hunyuan_image3.prompt_utils import HUNYUAN_IMAGE3_SPECIAL_TOKEN_IDS
 from vllm_omni.model_executor.models.hunyuan_image3.autoencoder_kl_3d import AutoencoderKLConv3D
 from vllm_omni.model_executor.models.hunyuan_image3.siglip2 import LightProjector, Siglip2VisionTransformer
@@ -1389,6 +1390,7 @@ class HunyuanImage3RotaryEmbedding(nn.Module):
         assert head_dim % 4 == 0, f"head_dim must be divisible by 4, got {head_dim}"
         inv_freq = 1.0 / (rope_theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.rotary_op = DiffusionRotaryEmbedding(is_neox_style=True)
 
     def forward(
         self,
@@ -1420,22 +1422,16 @@ class HunyuanImage3RotaryEmbedding(nn.Module):
         # Interleave: [y*θ₀, x*θ₁, y*θ₂, x*θ₃, ...]
         freqs = torch.stack([y_freqs, x_freqs], dim=-1).reshape(num_tokens, -1)
 
-        emb = torch.cat([freqs, freqs], dim=-1)
-        cos = emb.cos().to(dtype).unsqueeze(1)
-        sin = emb.sin().to(dtype).unsqueeze(1)
+        cos = freqs.cos().to(dtype)
+        sin = freqs.sin().to(dtype)
 
         query = query.view(num_tokens, -1, self.head_dim)
         key = key.view(num_tokens, -1, self.head_dim)
 
-        query = query * cos + self._rotate_half(query) * sin
-        key = key * cos + self._rotate_half(key) * sin
+        query = self.rotary_op(query, cos, sin)
+        key = self.rotary_op(key, cos, sin)
 
         return query.view(query_shape), key.view(key_shape)
-
-    def _rotate_half(self, x: torch.Tensor) -> torch.Tensor:
-        x1 = x[..., : x.shape[-1] // 2]
-        x2 = x[..., x.shape[-1] // 2 :]
-        return torch.cat((-x2, x1), dim=-1)
 
 
 @MULTIMODAL_REGISTRY.register_processor(
