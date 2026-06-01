@@ -1922,7 +1922,8 @@ class HunyuanImage3ForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
                 int(vae_generator_seed.reshape(-1)[img_idx].item())
             )
 
-        if not self.use_vae_data_parallel:
+        batch_size = len(vae_pixel_values)
+        if not self.use_vae_data_parallel or batch_size <= 1:
             vae_token_embeddings = []
             for img_idx, vae_image_i in enumerate(vae_pixel_values):
                 generator = _make_generator(img_idx, vae_image_i.device)
@@ -1932,7 +1933,6 @@ class HunyuanImage3ForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
                 vae_token_embeddings.append(vae_tokens)
             return vae_token_embeddings
 
-        batch_size = len(vae_pixel_values)
         if batch_size == 0:
             return []
 
