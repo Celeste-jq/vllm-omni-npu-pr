@@ -688,14 +688,14 @@ def print_case_config(
         )
 
 
-def build_benchmark_configuration(summary: dict[str, Any], deploy_config: Path, batch_size: int) -> str:
+def build_benchmark_configuration(config: dict[str, Any], deploy_config: Path, batch_size: int) -> str:
     return (
         f"{deploy_config.name} | batch={batch_size} | "
-        f"ar_seqs={summary['ar_max_num_seqs']} dit_seqs={summary['dit_max_num_seqs']} | "
-        f"inflight={summary['edge_max_inflight']} | "
-        f"ar_mem={summary['ar_gpu_memory_utilization']} dit_mem={summary['dit_gpu_memory_utilization']} | "
-        f"ar_tokens={summary['ar_max_tokens']} | "
-        f"cudagraph={summary['cudagraph_mode']}"
+        f"ar_seqs={config['ar_max_num_seqs']} dit_seqs={config['dit_max_num_seqs']} | "
+        f"inflight={config['edge_max_inflight']} | "
+        f"ar_mem={config['ar_gpu_memory_utilization']} dit_mem={config['dit_gpu_memory_utilization']} | "
+        f"ar_tokens={config['ar_max_tokens']} | "
+        f"cudagraph={config['cudagraph_mode']}"
     )
 
 
@@ -716,8 +716,13 @@ def build_benchmark_observation(summary: dict[str, Any]) -> str:
     return "; ".join(notes)
 
 
-def print_benchmark_results(summary: dict[str, Any], deploy_config: Path, batch_size: int) -> None:
-    configuration = build_benchmark_configuration(summary, deploy_config, batch_size)
+def print_benchmark_results(
+    summary: dict[str, Any],
+    config: dict[str, Any],
+    deploy_config: Path,
+    batch_size: int,
+) -> None:
+    configuration = build_benchmark_configuration(config, deploy_config, batch_size)
     observation = build_benchmark_observation(summary)
     rows = [
         ("Configuration", configuration),
@@ -948,7 +953,7 @@ def main(argv: list[str] | None = None) -> int:
         vit_dp_summary=vit_dp_summary,
         saved_image_paths=summarize_image_paths(metrics),
     )
-    print_benchmark_results(result, run_deploy_config, batch_size)
+    print_benchmark_results(result, config_info, run_deploy_config, batch_size)
     write_outputs(
         output_dir,
         config_info,
