@@ -22,6 +22,7 @@ KV_CACHE_PATTERNS = (
     re.compile(r"\[kv-cache-profile\].*?\bnum_blocks=(\d+)\b"),
     re.compile(r"\bnum_blocks=(\d+)\b"),
     re.compile(r"\bnum_blocks:\s*(\d+)\b"),
+    re.compile(r"\bnum_gpu_blocks=(\d+)\b"),
 )
 
 
