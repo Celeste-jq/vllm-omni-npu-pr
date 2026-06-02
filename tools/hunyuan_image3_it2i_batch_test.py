@@ -29,7 +29,13 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DEPLOY_CONFIG = REPO_ROOT / "vllm_omni" / "deploy" / "hunyuan_image3_it2i_npu_aclgraph_rope_vitdp.yaml"
-KV_CACHE_PATTERNS = (
+KV_CACHE_PROFILE_PATTERN = re.compile(
+    r"\[kv-cache-profile\].*?\brank=(?P<rank>\d+).*?"
+    r"\bstage_id=(?P<stage_id>[^ ]+).*?"
+    r"\bnum_blocks=(?P<num_blocks>\d+).*?"
+    r"\bblock_size=(?P<block_size>\d+)"
+)
+KV_CACHE_NUM_BLOCK_PATTERNS = (
     re.compile(r"\[kv-cache-profile\].*?\bnum_blocks=(\d+)\b"),
     re.compile(r"\bnum_blocks=(\d+)\b"),
     re.compile(r"\bnum_blocks:\s*(\d+)\b"),
@@ -121,12 +127,30 @@ def mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
-def parse_num_blocks(log_text: str) -> int | None:
-    for pattern in KV_CACHE_PATTERNS:
+def parse_kv_cache_profile(log_text: str) -> dict[str, int]:
+    fallback: dict[str, int] = {}
+    for match in KV_CACHE_PROFILE_PATTERN.finditer(log_text):
+        profile = {
+            "num_blocks": int(match.group("num_blocks")),
+            "block_size": int(match.group("block_size")),
+        }
+        stage_id = match.group("stage_id")
+        if stage_id in ("0", "None"):
+            return profile
+        fallback = profile
+    if fallback:
+        return fallback
+    for pattern in KV_CACHE_NUM_BLOCK_PATTERNS:
         match = pattern.search(log_text)
         if match:
-            return int(match.group(1))
-    return None
+            return {"num_blocks": int(match.group(1)), "block_size": 128}
+    return {"num_blocks": 0, "block_size": 128}
+
+
+def merge_kv_cache_profile(previous: dict[str, int], current: dict[str, int]) -> dict[str, int]:
+    if current.get("num_blocks", 0) > 0:
+        return current
+    return previous
 
 
 def parse_vit_dp_batch_logs(log_text: str) -> dict[str, Any]:
@@ -540,7 +564,7 @@ def summarize_results(
     warmup_runs: int,
     wall_time_s: float,
     metrics: list[RequestMetric],
-    num_blocks: int | None,
+    kv_cache_profile: dict[str, int],
     input_tokens: int,
     output_tokens: int,
     vit_dp_summary: dict[str, Any],
@@ -551,11 +575,8 @@ def summarize_results(
     ttfts = [metric.ttft_s for metric in successes if metric.ttft_s > 0.0]
     e2es = [metric.e2e_s for metric in successes if metric.e2e_s > 0.0]
     peaks = [metric.peak_memory_mb for metric in successes if metric.peak_memory_mb > 0.0]
-    tpot_proxy_s = [
-        max(metric.e2e_s - metric.ttft_s, 0.0) / max(output_tokens - 1, 1)
-        for metric in successes
-        if metric.e2e_s > 0.0
-    ]
+    tpot_values_s: list[float] = []
+    ttft_source = "ar_delta" if any(metric.ar_delta_count > 0 for metric in successes) else "first_event_fallback"
     ar_stages = [
         find_stage_duration_seconds(
             metric.stage_durations,
@@ -588,13 +609,16 @@ def summarize_results(
         )
         for metric in successes
     ]
-    blocks_per_request = max(1, math.ceil((input_tokens + output_tokens) / 128))
-    estimated_max_batch = (num_blocks or 0) // blocks_per_request if num_blocks else 0
+    block_size = kv_cache_profile.get("block_size") or 128
+    num_blocks = kv_cache_profile.get("num_blocks") or 0
+    blocks_per_request = max(1, math.ceil((input_tokens + output_tokens) / block_size))
+    estimated_max_batch = num_blocks // blocks_per_request if num_blocks else 0
     result = {
         "batch_size": batch_size,
         "warmup_runs": warmup_runs,
         "num_requests": batch_size,
         "num_blocks": num_blocks or 0,
+        "block_size": block_size,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "blocks_per_request": blocks_per_request,
@@ -612,7 +636,10 @@ def summarize_results(
         "ttft_p50_s": percentile(ttfts, 0.50),
         "ttft_p90_s": percentile(ttfts, 0.90),
         "ttft_p95_s": percentile(ttfts, 0.95),
-        "tpot_p50_s": percentile(tpot_proxy_s, 0.50),
+        "ttft_source": ttft_source,
+        "tpot_p50_s": percentile(tpot_values_s, 0.50),
+        "tpot_available": bool(tpot_values_s),
+        "tpot_note": "N/A for current IT2I image-only responses because no per-token stream timing is returned.",
         "e2e_mean_s": mean(e2es),
         "e2e_p50_s": percentile(e2es, 0.50),
         "e2e_p95_s": percentile(e2es, 0.95),
@@ -623,6 +650,7 @@ def summarize_results(
         "ar_text_chars_mean": mean([float(metric.ar_text_chars) for metric in successes]),
         "request_throughput_qps": len(successes) / wall_time_s if wall_time_s > 0.0 else 0.0,
         "total_token_throughput_tok_s": (len(successes) / wall_time_s * (input_tokens + output_tokens)) if wall_time_s > 0.0 else 0.0,
+        "total_token_throughput_note": "Estimated from input_tokens and output_tokens arguments.",
         "response_event_types": union_event_types(metrics),
         "stage_duration_keys": union_stage_duration_keys(metrics),
         "saved_image_paths": saved_image_paths,
@@ -708,7 +736,7 @@ def build_benchmark_observation(summary: dict[str, Any]) -> str:
     if summary["vit_dp_request_global_batch_max"] and summary["vit_dp_request_global_batch_max"] < summary["batch_size"]:
         notes.append("AR ViT DP global_batch < batch_size")
     if summary["response_event_types"] == ["image"]:
-        notes.append("image-only response; TPOT is a proxy from tail latency")
+        notes.append("image-only response; TTFT uses first event fallback; TPOT unavailable")
     if summary["saved_image_paths"]:
         notes.append(f"saved {len(summary['saved_image_paths'])} images")
     if summary["peak_memory_mb_max"] > 0.0:
@@ -730,14 +758,13 @@ def print_benchmark_results(
         ("Mean TTFT", f"{summary['ttft_mean_s'] * 1000.0:.2f} ms"),
         ("P50 TTFT", f"{summary['ttft_p50_s'] * 1000.0:.2f} ms"),
         ("P90 TTFT", f"{summary['ttft_p90_s'] * 1000.0:.2f} ms"),
-        ("P50 TPOT", f"{summary['tpot_p50_s'] * 1000.0:.2f} ms"),
-        ("Total Token Throughput", f"{summary['total_token_throughput_tok_s']:.2f} tok/s"),
+        ("P50 TPOT", f"{summary['tpot_p50_s'] * 1000.0:.2f} ms" if summary["tpot_available"] else "N/A"),
+        ("Total Token Throughput", f"{summary['total_token_throughput_tok_s']:.2f} tok/s (estimated)"),
         ("Observation", observation),
     ]
-    widths = [max(len(title), len(value)) for title, value in rows]
     print("\n========== Benchmark Results ==========")
-    for (title, value), width in zip(rows, widths, strict=True):
-        print(f"{title:<{width}}  {value}")
+    for title, value in rows:
+        print(f"{title:<24} {value}")
 
 
 def print_result_summary(summary: dict[str, Any]) -> None:
@@ -747,7 +774,7 @@ def print_result_summary(summary: dict[str, Any]) -> None:
         f"success={summary['success']} fail={summary['fail']} success_rate={summary['success_rate']:.3f}"
     )
     print(
-        f"num_blocks={summary['num_blocks']} input_tokens={summary['input_tokens']} "
+        f"num_blocks={summary['num_blocks']} block_size={summary['block_size']} input_tokens={summary['input_tokens']} "
         f"output_tokens={summary['output_tokens']} blocks_per_request={summary['blocks_per_request']} "
         f"estimated_max_batch={summary['estimated_max_batch']} max_concurrency={summary['max_concurrency']}"
     )
@@ -759,8 +786,15 @@ def print_result_summary(summary: dict[str, Any]) -> None:
     )
     print(
         f"ttft_mean_s={summary['ttft_mean_s']:.3f} "
-        f"ttft_p50_s={summary['ttft_p50_s']:.3f} ttft_p95_s={summary['ttft_p95_s']:.3f}"
+        f"ttft_p50_s={summary['ttft_p50_s']:.3f} ttft_p95_s={summary['ttft_p95_s']:.3f} "
+        f"ttft_source={summary['ttft_source']}"
     )
+    tpot_text = f"{summary['tpot_p50_s']:.6f}" if summary["tpot_available"] else "N/A"
+    print(
+        f"tpot_p50_s={tpot_text} "
+        f"tpot_available={str(summary['tpot_available']).lower()} note={summary['tpot_note']}"
+    )
+    print(f"total_token_throughput_note={summary['total_token_throughput_note']}")
     print(
         f"e2e_mean_s={summary['e2e_mean_s']:.3f} "
         f"e2e_p50_s={summary['e2e_p50_s']:.3f} e2e_p95_s={summary['e2e_p95_s']:.3f}"
@@ -912,14 +946,14 @@ def main(argv: list[str] | None = None) -> int:
     server = ManagedServer(model=args.model, deploy_config=run_deploy_config, host=args.host, port=args.port, log_file=log_file)
     metrics: list[RequestMetric] = []
     wall_time_s = 0.0
-    num_blocks: int | None = None
+    kv_cache_profile: dict[str, int] = {"num_blocks": 0, "block_size": 128}
     request_log_start = 0
     vit_dp_summary: dict[str, Any] = parse_vit_dp_batch_logs("")
     try:
         server.start()
         server.wait_ready(args.server_timeout_s)
         log_text = server.read_log()
-        num_blocks = parse_num_blocks(log_text)
+        kv_cache_profile = parse_kv_cache_profile(log_text)
         if args.warmup_runs > 0:
             print(f"[warmup] runs={args.warmup_runs} batch_size={batch_size}")
             for warmup_idx in range(args.warmup_runs):
@@ -936,7 +970,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         server.stop()
     log_text = server.read_log()
-    num_blocks = parse_num_blocks(log_text) or num_blocks
+    kv_cache_profile = merge_kv_cache_profile(kv_cache_profile, parse_kv_cache_profile(log_text))
     request_log_text = log_text[request_log_start:]
     vit_dp_summary = parse_vit_dp_batch_logs(request_log_text)
     if vit_dp_summary["vit_dp_request_shard_log_count"] == 0 and vit_dp_summary["vit_dp_request_encode_state_log_count"] == 0:
@@ -947,7 +981,7 @@ def main(argv: list[str] | None = None) -> int:
         warmup_runs=args.warmup_runs,
         wall_time_s=wall_time_s,
         metrics=metrics,
-        num_blocks=num_blocks,
+        kv_cache_profile=kv_cache_profile,
         input_tokens=args.input_tokens,
         output_tokens=args.output_tokens,
         vit_dp_summary=vit_dp_summary,
