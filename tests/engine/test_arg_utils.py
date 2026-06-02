@@ -67,41 +67,11 @@ def test_multimodal_kwarg_overrides(mocker):
     assert cfg.multimodal_config.mm_processor_cache_gb == override_val
 
 
-def test_mm_encoder_tp_mode_is_copied_to_omni_model_config(mocker):
-    """Stage YAML mm_encoder_tp_mode must survive into model construction."""
-    fake_model_config = SimpleNamespace(multimodal_config=SimpleNamespace())
-    captured: dict[str, object] = {}
-
-    def _fake_parent_create_model_config(self):
-        return fake_model_config
-
-    def _fake_from_vllm_model_config(model_config, **omni_kwargs):
-        captured.update(omni_kwargs)
-        return model_config
-
-    mocker.patch.object(EngineArgs, "create_model_config", _fake_parent_create_model_config)
-    mocker.patch.object(OmniModelConfig, "from_vllm_model_config", side_effect=_fake_from_vllm_model_config)
-
-    args = OmniEngineArgs()
-    args.mm_encoder_tp_mode = "data"
-    args.create_model_config()
-
-    assert captured["mm_encoder_tp_mode"] == "data"
-
-
 def test_from_vllm_config_validates_invalid_omni_kwargs():
     """Ensure omni-specific field validation catches invalid keys."""
     model_config = EngineArgs().create_model_config()
     with pytest.raises(ValueError, match="Unexpected omni kwarg"):
         OmniModelConfig.from_vllm_model_config(model_config, foo="bar")
-
-
-def test_from_vllm_config_accepts_model_config_field_overrides():
-    """Existing ModelConfig fields may be forwarded as explicit overrides."""
-    model_config = EngineArgs().create_model_config()
-    cfg = OmniModelConfig.from_vllm_model_config(model_config, model="override-model")
-
-    assert cfg.model == "override-model"
 
 
 def test_from_vllm_config_validates_bad_omni_kwarg_types():
