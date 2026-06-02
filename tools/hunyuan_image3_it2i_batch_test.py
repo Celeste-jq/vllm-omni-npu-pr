@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import math
 import os
@@ -54,6 +55,7 @@ class RequestMetric:
     stage_durations: dict[str, float]
     event_types: list[str]
     peak_memory_mb: float
+    image_paths: list[str]
     error: str
 
 
@@ -365,6 +367,7 @@ async def send_one_request(
     seed: int,
     request_index: int,
     timeout_s: float,
+    image_dir: Path | None,
 ) -> RequestMetric:
     import aiohttp
 
@@ -389,6 +392,7 @@ async def send_one_request(
     stage_durations: dict[str, float] = {}
     event_types: list[str] = []
     peak_memory_mb = 0.0
+    image_paths: list[str] = []
     error = ""
 
     try:
@@ -416,6 +420,17 @@ async def send_one_request(
                             key: float(value) for key, value in (payload.get("stage_durations") or {}).items()
                         }
                         peak_memory_mb = float(payload.get("peak_memory_mb") or 0.0)
+                        if image_dir is not None:
+                            data_items = payload.get("data") or []
+                            for image_index, image_item in enumerate(data_items):
+                                b64_json = image_item.get("b64_json")
+                                if not b64_json:
+                                    continue
+                                output_format = payload.get("output_format") or "png"
+                                image_bytes = base64.b64decode(b64_json)
+                                image_path = image_dir / f"request_{request_index:03d}_image_{image_index:02d}.{output_format}"
+                                image_path.write_bytes(image_bytes)
+                                image_paths.append(str(image_path))
                     elif payload.get("object") == "error":
                         error = json.dumps(payload.get("error", {}), ensure_ascii=True)
             if response.status != 200 and not error:
@@ -432,6 +447,7 @@ async def send_one_request(
                 stage_durations=stage_durations,
                 event_types=event_types,
                 peak_memory_mb=peak_memory_mb,
+                image_paths=image_paths,
                 error=error,
             )
     except Exception as exc:  # noqa: BLE001
@@ -447,11 +463,17 @@ async def send_one_request(
             stage_durations=stage_durations,
             event_types=event_types,
             peak_memory_mb=peak_memory_mb,
+            image_paths=image_paths,
             error=str(exc),
         )
 
 
-async def run_batch_requests(args: argparse.Namespace, batch_size: int) -> tuple[float, list[RequestMetric]]:
+async def run_batch_requests(
+    args: argparse.Namespace,
+    batch_size: int,
+    *,
+    image_dir: Path | None,
+) -> tuple[float, list[RequestMetric]]:
     import aiohttp
 
     api_url = f"http://{args.host}:{args.port}/v1/images/edits"
@@ -474,6 +496,7 @@ async def run_batch_requests(args: argparse.Namespace, batch_size: int) -> tuple
                     seed=args.seed,
                     request_index=index,
                     timeout_s=args.request_timeout_s,
+                    image_dir=image_dir,
                 )
                 for index in range(batch_size)
             ]
@@ -481,15 +504,24 @@ async def run_batch_requests(args: argparse.Namespace, batch_size: int) -> tuple
         return time.perf_counter() - started, list(metrics)
 
 
+def summarize_image_paths(metrics: list[RequestMetric]) -> list[str]:
+    paths: list[str] = []
+    for metric in metrics:
+        paths.extend(metric.image_paths)
+    return paths
+
+
 def summarize_results(
     *,
     batch_size: int,
+    warmup_runs: int,
     wall_time_s: float,
     metrics: list[RequestMetric],
     num_blocks: int | None,
     input_tokens: int,
     output_tokens: int,
     vit_dp_summary: dict[str, Any],
+    saved_image_paths: list[str],
 ) -> dict[str, Any]:
     successes = [metric for metric in metrics if metric.success]
     first_events = [metric.first_event_s for metric in successes if metric.first_event_s > 0.0]
@@ -532,6 +564,7 @@ def summarize_results(
     estimated_max_batch = (num_blocks or 0) // blocks_per_request if num_blocks else 0
     result = {
         "batch_size": batch_size,
+        "warmup_runs": warmup_runs,
         "num_requests": batch_size,
         "num_blocks": num_blocks or 0,
         "input_tokens": input_tokens,
@@ -559,6 +592,7 @@ def summarize_results(
         "ar_text_chars_mean": mean([float(metric.ar_text_chars) for metric in successes]),
         "response_event_types": union_event_types(metrics),
         "stage_duration_keys": union_stage_duration_keys(metrics),
+        "saved_image_paths": saved_image_paths,
         "first_error": next((metric.error for metric in metrics if metric.error), ""),
     }
     result.update(vit_dp_summary)
@@ -624,7 +658,7 @@ def print_case_config(
 def print_result_summary(summary: dict[str, Any]) -> None:
     print("\n========== result summary ==========")
     print(
-        f"batch_size={summary['batch_size']} num_requests={summary['num_requests']} "
+        f"batch_size={summary['batch_size']} warmup_runs={summary['warmup_runs']} num_requests={summary['num_requests']} "
         f"success={summary['success']} fail={summary['fail']} success_rate={summary['success_rate']:.3f}"
     )
     print(
@@ -657,6 +691,7 @@ def print_result_summary(summary: dict[str, Any]) -> None:
     )
     print(f"response_event_types={summary['response_event_types']}")
     print(f"stage_duration_keys={summary['stage_duration_keys']}")
+    print(f"saved_image_paths={summary['saved_image_paths']}")
     if not summary["stage_duration_keys"]:
         print("[warning] Response image chunks did not include stage_durations.")
     elif summary["ar_stage_mean_s"] == 0.0 or summary["dit_stage_mean_s"] == 0.0:
@@ -732,6 +767,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--server-timeout-s", type=float, default=900.0)
     parser.add_argument("--request-timeout-s", type=float, default=900.0)
     parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--warmup-runs", type=int, default=1, help="Warmup batch runs before the measured test.")
     parser.add_argument("--profile-ar", action="store_true", help="Enable torch profiler only on AR stage 0.")
     parser.add_argument("--profiler-record-shapes", action="store_true")
     parser.add_argument("--profiler-with-stack", action="store_true")
@@ -755,12 +791,15 @@ def main(argv: list[str] | None = None) -> int:
     batch_size = args.batch_size or infer_batch_size(config)
     if batch_size <= 0:
         raise ValueError("batch_size must be > 0")
+    if args.warmup_runs < 0:
+        raise ValueError("warmup_runs must be >= 0")
 
     output_dir = (
         Path(args.output_dir).expanduser().resolve()
         if args.output_dir
         else REPO_ROOT / "test_outputs" / "hunyuan_image3_it2i_batch_test" / f"batch_{batch_size}_{time.strftime('%Y%m%d_%H%M%S')}"
     )
+    image_dir = output_dir / "images"
     profiler_dir = output_dir / "ar_profiler"
     profiler_config = build_ar_profiler_config(args, profiler_dir) if args.profile_ar else None
     run_deploy_config = prepare_deploy_config_for_run(
@@ -776,6 +815,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print_case_config(args=args, batch_size=batch_size, deploy_config=run_deploy_config, summary=config_info)
     print(f"\n[info] output_dir={output_dir}")
+    print(f"[info] image_dir={image_dir}")
     print(f"[info] server_log={log_file}")
     if args.profile_ar:
         print(f"[info] ar_profiler_dir={profiler_dir}")
@@ -784,6 +824,7 @@ def main(argv: list[str] | None = None) -> int:
     server = ManagedServer(model=args.model, deploy_config=run_deploy_config, host=args.host, port=args.port, log_file=log_file)
     metrics: list[RequestMetric] = []
     wall_time_s = 0.0
+    num_blocks: int | None = None
     request_log_start = 0
     vit_dp_summary: dict[str, Any] = parse_vit_dp_batch_logs("")
     try:
@@ -791,8 +832,19 @@ def main(argv: list[str] | None = None) -> int:
         server.wait_ready(args.server_timeout_s)
         log_text = server.read_log()
         num_blocks = parse_num_blocks(log_text)
+        if args.warmup_runs > 0:
+            print(f"[warmup] runs={args.warmup_runs} batch_size={batch_size}")
+            for warmup_idx in range(args.warmup_runs):
+                print(f"[warmup] {warmup_idx + 1}/{args.warmup_runs}")
+                _, warmup_metrics = asyncio.run(
+                    run_batch_requests(args, batch_size, image_dir=None)
+                )
+                warmup_success = sum(1 for metric in warmup_metrics if metric.success)
+                print(f"[warmup] completed success={warmup_success}/{len(warmup_metrics)}")
+        log_text = server.read_log()
         request_log_start = len(log_text)
-        wall_time_s, metrics = asyncio.run(run_batch_requests(args, batch_size))
+        image_dir.mkdir(parents=True, exist_ok=True)
+        wall_time_s, metrics = asyncio.run(run_batch_requests(args, batch_size, image_dir=image_dir))
     finally:
         server.stop()
     log_text = server.read_log()
@@ -802,12 +854,14 @@ def main(argv: list[str] | None = None) -> int:
 
     result = summarize_results(
         batch_size=batch_size,
+        warmup_runs=args.warmup_runs,
         wall_time_s=wall_time_s,
         metrics=metrics,
         num_blocks=num_blocks,
         input_tokens=args.input_tokens,
         output_tokens=args.output_tokens,
         vit_dp_summary=vit_dp_summary,
+        saved_image_paths=summarize_image_paths(metrics),
     )
     write_outputs(
         output_dir,
