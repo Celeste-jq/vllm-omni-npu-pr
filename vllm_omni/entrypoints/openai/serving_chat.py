@@ -2472,6 +2472,12 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                 result = build_prompt_tokens(prompt, tokenizer, **build_kwargs)
                 prompt_token_ids = result.token_ids
                 system_prompt_type = result.system_prompt_type
+                logger.info(
+                    "[HunyuanImage3 token-profile] task=%r prompt_tokens=%d "
+                    "source=build_prompt_tokens",
+                    build_kwargs["task"],
+                    len(prompt_token_ids),
+                )
             else:
                 prompt = build_prompt(prompt, **build_kwargs)
             if reference_images and len(reference_images) == 1:

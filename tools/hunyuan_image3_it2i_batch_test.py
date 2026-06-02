@@ -29,11 +29,18 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DEPLOY_CONFIG = REPO_ROOT / "vllm_omni" / "deploy" / "hunyuan_image3_it2i_npu_aclgraph_rope_vitdp.yaml"
-KV_CACHE_PROFILE_PATTERN = re.compile(
-    r"\[kv-cache-profile\].*?\brank=(?P<rank>\d+).*?"
-    r"\bstage_id=(?P<stage_id>[^ ]+).*?"
-    r"\bnum_blocks=(?P<num_blocks>\d+).*?"
-    r"\bblock_size=(?P<block_size>\d+)"
+KV_CACHE_PROFILE_PATTERNS = (
+    re.compile(
+        r"\[kv-cache-profile\].*?\brank=(?P<rank>\d+).*?"
+        r"\bstage_id=(?P<stage_id>[^ ]+).*?"
+        r"\bnum_blocks=(?P<num_blocks>\d+).*?"
+        r"\bblock_size=(?P<block_size>\d+)"
+    ),
+    re.compile(
+        r"\[kv-cache-profile\].*?\brank=(?P<rank>\d+).*?"
+        r"\bnum_blocks=(?P<num_blocks>\d+).*?"
+        r"\bblock_size=(?P<block_size>\d+)"
+    ),
 )
 KV_CACHE_NUM_BLOCK_PATTERNS = (
     re.compile(r"\[kv-cache-profile\].*?\bnum_blocks=(\d+)\b"),
@@ -56,6 +63,9 @@ VIT_DP_ENCODE_STATE_PATTERN = re.compile(
     r"\btp_rank=(\d+).*?\btp_size=(\d+).*?\bbatch_size=(\d+)"
 )
 AR_GENERATED_TOKENS_PATTERN = re.compile(r"\[ar2diffusion\] Request \d+: AR generated (\d+) tokens")
+HUNYUAN_IMAGE3_INPUT_TOKENS_PATTERN = re.compile(
+    r"\[HunyuanImage3 token-profile\].*?\bprompt_tokens=(\d+)\b"
+)
 
 
 @dataclass
@@ -142,18 +152,19 @@ def collect_kv_cache_log_candidates(log_text: str, *, limit: int = 20) -> list[s
 
 def parse_kv_cache_profile(log_text: str) -> dict[str, Any]:
     fallback: dict[str, Any] = {}
-    for match in KV_CACHE_PROFILE_PATTERN.finditer(log_text):
-        profile = {
-            "num_blocks": int(match.group("num_blocks")),
-            "block_size": int(match.group("block_size")),
-            "kv_cache_profile_source": "kv-cache-profile",
-            "kv_cache_profile_found": True,
-            "kv_cache_log_candidates": collect_kv_cache_log_candidates(log_text),
-        }
-        stage_id = match.group("stage_id")
-        if stage_id in ("0", "None"):
-            return profile
-        fallback = profile
+    for pattern in KV_CACHE_PROFILE_PATTERNS:
+        for match in pattern.finditer(log_text):
+            profile = {
+                "num_blocks": int(match.group("num_blocks")),
+                "block_size": int(match.group("block_size")),
+                "kv_cache_profile_source": "kv-cache-profile",
+                "kv_cache_profile_found": True,
+                "kv_cache_log_candidates": collect_kv_cache_log_candidates(log_text),
+            }
+            stage_id = match.groupdict().get("stage_id")
+            if stage_id in ("0", "None") or stage_id is None:
+                return profile
+            fallback = profile
     if fallback:
         return fallback
     for pattern in KV_CACHE_NUM_BLOCK_PATTERNS:
@@ -182,20 +193,14 @@ def merge_kv_cache_profile(previous: dict[str, Any], current: dict[str, Any]) ->
 
 
 def print_kv_cache_profile(profile: dict[str, Any], *, phase: str) -> None:
-    print(f"\n========== kv cache profile ({phase}) ==========")
-    print(f"num_blocks={profile.get('num_blocks', 0)}")
-    print(f"block_size={profile.get('block_size', 128)}")
-    print(f"kv_cache_profile_found={str(bool(profile.get('kv_cache_profile_found'))).lower()}")
-    print(f"kv_cache_profile_source={profile.get('kv_cache_profile_source', 'missing')}")
+    print(
+        f"[kv-cache] phase={phase} num_blocks={profile.get('num_blocks', 0)} "
+        f"block_size={profile.get('block_size', 128)} "
+        f"found={str(bool(profile.get('kv_cache_profile_found'))).lower()} "
+        f"source={profile.get('kv_cache_profile_source', 'missing')}"
+    )
     if not profile.get("num_blocks", 0):
-        print("[warning] num_blocks is missing. Check whether the actual NPU runner printed kv_cache_config/num_blocks.")
-        candidates = profile.get("kv_cache_log_candidates") or []
-        if candidates:
-            print("kv_cache_log_candidates:")
-            for line in candidates:
-                print(f"  {line}")
-        else:
-            print("[warning] No num_blocks/num_gpu_blocks/kv-cache-profile lines found in server_log so far.")
+        print("[warning] num_blocks missing; max_concurrency will be 0. Check server_log for [kv-cache-profile].")
 
 
 def parse_vit_dp_batch_logs(log_text: str) -> dict[str, Any]:
@@ -252,6 +257,10 @@ def parse_vit_dp_batch_logs(log_text: str) -> dict[str, Any]:
 
 def parse_ar_generated_tokens(log_text: str) -> list[int]:
     return [int(match.group(1)) for match in AR_GENERATED_TOKENS_PATTERN.finditer(log_text)]
+
+
+def parse_input_tokens(log_text: str) -> list[int]:
+    return [int(match.group(1)) for match in HUNYUAN_IMAGE3_INPUT_TOKENS_PATTERN.finditer(log_text)]
 
 
 def duration_value_seconds(key: str, value: float) -> float:
@@ -616,6 +625,7 @@ def summarize_results(
     kv_cache_profile: dict[str, Any],
     input_tokens: int,
     output_tokens: int,
+    observed_input_tokens: list[int],
     observed_ar_output_tokens: list[int],
     vit_dp_summary: dict[str, Any],
     saved_image_paths: list[str],
@@ -661,6 +671,13 @@ def summarize_results(
     ]
     block_size = kv_cache_profile.get("block_size") or 128
     num_blocks = kv_cache_profile.get("num_blocks") or 0
+    observed_input_tokens_for_capacity = max(observed_input_tokens, default=0)
+    input_tokens_for_capacity = observed_input_tokens_for_capacity or input_tokens
+    input_tokens_for_capacity_source = (
+        "server_log_token_profile"
+        if observed_input_tokens_for_capacity
+        else "cli_estimate_for_max_concurrency"
+    )
     observed_output_tokens_for_capacity = max(observed_ar_output_tokens, default=0)
     output_tokens_for_capacity = observed_output_tokens_for_capacity or output_tokens
     output_tokens_for_capacity_source = (
@@ -668,7 +685,7 @@ def summarize_results(
         if observed_output_tokens_for_capacity
         else "cli_estimate_for_max_concurrency"
     )
-    tokens_per_request = input_tokens + output_tokens_for_capacity
+    tokens_per_request = input_tokens_for_capacity + output_tokens_for_capacity
     blocks_per_request = max(1, math.ceil(tokens_per_request / block_size))
     estimated_max_batch = num_blocks // blocks_per_request if num_blocks else 0
     result = {
@@ -682,8 +699,14 @@ def summarize_results(
         "kv_cache_log_candidates": kv_cache_profile.get("kv_cache_log_candidates", []),
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
-        "input_tokens_source": "cli_estimate",
+        "input_tokens_source": "cli_default",
         "output_tokens_source": "cli_default",
+        "input_tokens_for_capacity": input_tokens_for_capacity,
+        "input_tokens_for_capacity_source": input_tokens_for_capacity_source,
+        "observed_input_tokens": observed_input_tokens,
+        "observed_input_tokens_mean": mean([float(value) for value in observed_input_tokens]),
+        "observed_input_tokens_max": max(observed_input_tokens, default=0),
+        "observed_input_tokens_source": "server_log_token_profile" if observed_input_tokens else "missing",
         "output_tokens_for_capacity": output_tokens_for_capacity,
         "output_tokens_for_capacity_source": output_tokens_for_capacity_source,
         "observed_ar_output_tokens": observed_ar_output_tokens,
@@ -692,7 +715,7 @@ def summarize_results(
         "observed_ar_output_tokens_source": "server_log_ar2diffusion" if observed_ar_output_tokens else "missing",
         "tokens_per_request": tokens_per_request,
         "blocks_per_request": blocks_per_request,
-        "max_concurrency_formula": "num_blocks // ceil((input_tokens + output_tokens_for_capacity) / block_size)",
+        "max_concurrency_formula": "num_blocks // ceil((input_tokens_for_capacity + output_tokens_for_capacity) / block_size)",
         "estimated_max_batch": estimated_max_batch,
         "max_concurrency": estimated_max_batch,
         "success": len(successes),
@@ -720,8 +743,8 @@ def summarize_results(
         "ar_delta_mean": mean([float(metric.ar_delta_count) for metric in successes]),
         "ar_text_chars_mean": mean([float(metric.ar_text_chars) for metric in successes]),
         "request_throughput_qps": len(successes) / wall_time_s if wall_time_s > 0.0 else 0.0,
-        "total_token_throughput_tok_s": (len(successes) / wall_time_s * (input_tokens + output_tokens)) if wall_time_s > 0.0 else 0.0,
-        "total_token_throughput_note": "Estimated from input_tokens and output_tokens arguments.",
+        "total_token_throughput_tok_s": (len(successes) / wall_time_s * tokens_per_request) if wall_time_s > 0.0 else 0.0,
+        "total_token_throughput_note": "Uses real prompt_tokens and real AR generated tokens when present; otherwise falls back to CLI estimates.",
         "response_event_types": union_event_types(metrics),
         "stage_duration_keys": union_stage_duration_keys(metrics),
         "saved_image_paths": saved_image_paths,
@@ -742,7 +765,7 @@ def print_case_config(
     print(f"deploy_config={deploy_config}")
     print(f"model={args.model}")
     print(f"image_path={args.image_path}")
-    print(f"prompt={args.prompt}")
+    print(f"prompt_chars={len(args.prompt)}")
     print(f"batch_size={batch_size}")
     print(f"max_num_seqs(ar/dit)={summary['ar_max_num_seqs']}/{summary['dit_max_num_seqs']}")
     print(f"edge_max_inflight={summary['edge_max_inflight']}")
@@ -830,7 +853,7 @@ def print_benchmark_results(
         ("P50 TTFT", f"{summary['ttft_p50_s'] * 1000.0:.2f} ms"),
         ("P90 TTFT", f"{summary['ttft_p90_s'] * 1000.0:.2f} ms"),
         ("P50 TPOT", f"{summary['tpot_p50_s'] * 1000.0:.2f} ms" if summary["tpot_available"] else "N/A"),
-        ("Total Token Throughput", f"{summary['total_token_throughput_tok_s']:.2f} tok/s (estimated)"),
+        ("Total Token Throughput", f"{summary['total_token_throughput_tok_s']:.2f} tok/s"),
         ("Observation", observation),
     ]
     print("\n========== Benchmark Results ==========")
@@ -846,46 +869,30 @@ def print_result_summary(summary: dict[str, Any]) -> None:
     )
     print("\n========== max concurrency calculation ==========")
     print(f"formula={summary['max_concurrency_formula']}")
-    print(f"num_blocks={summary['num_blocks']}")
-    print(f"block_size={summary['block_size']}")
-    print(f"input_tokens={summary['input_tokens']}")
-    print(f"output_tokens_cli_default={summary['output_tokens']}")
-    print(f"output_tokens_for_capacity={summary['output_tokens_for_capacity']}")
-    print(f"input_tokens_source={summary['input_tokens_source']}")
-    print(f"output_tokens_source={summary['output_tokens_source']}")
-    print(f"output_tokens_for_capacity_source={summary['output_tokens_for_capacity_source']}")
     print(
-        f"observed_ar_output_tokens={summary['observed_ar_output_tokens']} "
-        f"mean={summary['observed_ar_output_tokens_mean']:.3f} "
-        f"max={summary['observed_ar_output_tokens_max']} "
-        f"source={summary['observed_ar_output_tokens_source']}"
+        f"num_blocks={summary['num_blocks']} block_size={summary['block_size']} "
+        f"kv_source={summary['kv_cache_profile_source']} kv_found={str(summary['kv_cache_profile_found']).lower()}"
     )
-    print(f"tokens_per_request=input_tokens+output_tokens_for_capacity={summary['tokens_per_request']}")
+    print(
+        f"input_tokens_for_capacity={summary['input_tokens_for_capacity']} "
+        f"source={summary['input_tokens_for_capacity_source']} "
+        f"observed_input_tokens={summary['observed_input_tokens']}"
+    )
+    print(
+        f"output_tokens_for_capacity={summary['output_tokens_for_capacity']} "
+        f"source={summary['output_tokens_for_capacity_source']} "
+        f"observed_ar_output_tokens={summary['observed_ar_output_tokens']}"
+    )
+    print(f"tokens_per_request={summary['tokens_per_request']}")
     print(f"blocks_per_request=ceil(tokens_per_request/block_size)={summary['blocks_per_request']}")
     print(f"max_concurrency=num_blocks//blocks_per_request={summary['max_concurrency']}")
-    print(
-        f"kv_cache_profile_found={str(summary['kv_cache_profile_found']).lower()} "
-        f"kv_cache_profile_source={summary['kv_cache_profile_source']}"
-    )
-    print(
-        f"num_blocks={summary['num_blocks']} block_size={summary['block_size']} input_tokens={summary['input_tokens']} "
-        f"output_tokens_for_capacity={summary['output_tokens_for_capacity']} blocks_per_request={summary['blocks_per_request']} "
-        f"estimated_max_batch={summary['estimated_max_batch']} max_concurrency={summary['max_concurrency']}"
-    )
     if summary["num_blocks"] == 0:
         print("[warning] num_blocks was not found in server_log; max_concurrency cannot be computed.")
-        if summary["kv_cache_log_candidates"]:
-            print("kv_cache_log_candidates:")
-            for line in summary["kv_cache_log_candidates"]:
-                print(f"  {line}")
-        else:
-            print("[warning] No KV cache candidate lines found in server_log.")
+    if summary["observed_input_tokens_source"] == "missing":
+        print("[warning] prompt_tokens was not found in server_log; input token count fell back to --input-tokens.")
+    if summary["observed_ar_output_tokens_source"] == "missing":
+        print("[warning] AR generated tokens were not found in server_log; output token count fell back to --output-tokens.")
     print(f"wall_time_s={summary['wall_time_s']:.3f} throughput_qps={summary['throughput_qps']:.3f}")
-    print(
-        f"first_event_mean_s={summary['first_event_mean_s']:.3f} "
-        f"first_event_p50_s={summary['first_event_p50_s']:.3f} "
-        f"first_event_p95_s={summary['first_event_p95_s']:.3f}"
-    )
     print(
         f"ttft_mean_s={summary['ttft_mean_s']:.3f} "
         f"ttft_p50_s={summary['ttft_p50_s']:.3f} ttft_p95_s={summary['ttft_p95_s']:.3f} "
@@ -912,7 +919,9 @@ def print_result_summary(summary: dict[str, Any]) -> None:
     )
     print(f"response_event_types={summary['response_event_types']}")
     print(f"stage_duration_keys={summary['stage_duration_keys']}")
-    print(f"saved_image_paths={summary['saved_image_paths']}")
+    print(f"saved_images={len(summary['saved_image_paths'])}")
+    if summary["saved_image_paths"]:
+        print(f"first_saved_image={summary['saved_image_paths'][0]}")
     if not summary["stage_duration_keys"]:
         print("[warning] Response image chunks did not include stage_durations.")
     elif summary["ar_stage_mean_s"] == 0.0 or summary["dit_stage_mean_s"] == 0.0:
@@ -1085,6 +1094,7 @@ def main(argv: list[str] | None = None) -> int:
     vit_dp_summary = parse_vit_dp_batch_logs(request_log_text)
     if vit_dp_summary["vit_dp_request_shard_log_count"] == 0 and vit_dp_summary["vit_dp_request_encode_state_log_count"] == 0:
         vit_dp_summary = parse_vit_dp_batch_logs(log_text)
+    observed_input_tokens = parse_input_tokens(request_log_text)
     observed_ar_output_tokens = parse_ar_generated_tokens(request_log_text)
 
     result = summarize_results(
@@ -1095,6 +1105,7 @@ def main(argv: list[str] | None = None) -> int:
         kv_cache_profile=kv_cache_profile,
         input_tokens=args.input_tokens,
         output_tokens=args.output_tokens,
+        observed_input_tokens=observed_input_tokens,
         observed_ar_output_tokens=observed_ar_output_tokens,
         vit_dp_summary=vit_dp_summary,
         saved_image_paths=summarize_image_paths(metrics),
