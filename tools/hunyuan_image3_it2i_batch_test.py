@@ -46,11 +46,13 @@ class RequestMetric:
     request_index: int
     success: bool
     http_status: int
+    first_event_s: float
     ttft_s: float
     e2e_s: float
     ar_delta_count: int
     ar_text_chars: int
     stage_durations: dict[str, float]
+    event_types: list[str]
     peak_memory_mb: float
     error: str
 
@@ -154,12 +156,31 @@ def parse_vit_dp_batch_logs(log_text: str) -> dict[str, Any]:
     }
 
 
-def find_stage_value(stage_durations: dict[str, float], candidates: tuple[str, ...]) -> float:
+def duration_value_seconds(key: str, value: float) -> float:
+    value = float(value)
+    return value / 1000.0 if key.endswith("_ms") else value
+
+
+def find_stage_duration_seconds(stage_durations: dict[str, float], candidates: tuple[str, ...]) -> float:
     for key in candidates:
         value = stage_durations.get(key)
         if value is not None:
-            return float(value)
+            return duration_value_seconds(key, float(value))
     return 0.0
+
+
+def union_stage_duration_keys(metrics: list[RequestMetric]) -> list[str]:
+    keys: set[str] = set()
+    for metric in metrics:
+        keys.update(metric.stage_durations.keys())
+    return sorted(keys)
+
+
+def union_event_types(metrics: list[RequestMetric]) -> list[str]:
+    event_types: set[str] = set()
+    for metric in metrics:
+        event_types.update(metric.event_types)
+    return sorted(event_types)
 
 
 def config_summary(config: dict[str, Any]) -> dict[str, Any]:
@@ -358,11 +379,13 @@ async def send_one_request(
 
     decoder = SSEDecoder()
     started = time.perf_counter()
+    first_event_s = 0.0
     ttft_s = 0.0
     e2e_s = 0.0
     ar_delta_count = 0
     ar_text_chars = 0
     stage_durations: dict[str, float] = {}
+    event_types: list[str] = []
     peak_memory_mb = 0.0
     error = ""
 
@@ -376,6 +399,10 @@ async def send_one_request(
                             e2e_s = now - started
                         continue
                     payload = json.loads(event)
+                    if first_event_s == 0.0:
+                        first_event_s = now - started
+                    event_type = str(payload.get("type") or payload.get("object") or "unknown")
+                    event_types.append(event_type)
                     if payload.get("type") == "ar_delta":
                         ar_delta_count += 1
                         ar_text_chars += len(payload.get("delta") or "")
@@ -395,11 +422,13 @@ async def send_one_request(
                 request_index=request_index,
                 success=response.status == 200 and not error and e2e_s > 0.0,
                 http_status=response.status,
-                ttft_s=ttft_s,
+                first_event_s=first_event_s,
+                ttft_s=ttft_s or first_event_s,
                 e2e_s=e2e_s,
                 ar_delta_count=ar_delta_count,
                 ar_text_chars=ar_text_chars,
                 stage_durations=stage_durations,
+                event_types=event_types,
                 peak_memory_mb=peak_memory_mb,
                 error=error,
             )
@@ -408,11 +437,13 @@ async def send_one_request(
             request_index=request_index,
             success=False,
             http_status=0,
+            first_event_s=first_event_s,
             ttft_s=ttft_s,
             e2e_s=e2e_s,
             ar_delta_count=ar_delta_count,
             ar_text_chars=ar_text_chars,
             stage_durations=stage_durations,
+            event_types=event_types,
             peak_memory_mb=peak_memory_mb,
             error=str(exc),
         )
@@ -459,14 +490,41 @@ def summarize_results(
     vit_dp_summary: dict[str, Any],
 ) -> dict[str, Any]:
     successes = [metric for metric in metrics if metric.success]
+    first_events = [metric.first_event_s for metric in successes if metric.first_event_s > 0.0]
     ttfts = [metric.ttft_s for metric in successes if metric.ttft_s > 0.0]
     e2es = [metric.e2e_s for metric in successes if metric.e2e_s > 0.0]
     peaks = [metric.peak_memory_mb for metric in successes if metric.peak_memory_mb > 0.0]
     ar_stages = [
-        find_stage_value(metric.stage_durations, ("stage_0", "ar", "prefill", "text", "llm")) for metric in successes
+        find_stage_duration_seconds(
+            metric.stage_durations,
+            (
+                "ar_stage_0",
+                "stage_0_gen_s",
+                "stage_0_gen_sec",
+                "stage_0_gen_ms",
+                "stage_0",
+                "ar",
+                "prefill",
+                "text",
+                "llm",
+            ),
+        )
+        for metric in successes
     ]
     dit_stages = [
-        find_stage_value(metric.stage_durations, ("stage_1", "dit", "diffusion", "image")) for metric in successes
+        find_stage_duration_seconds(
+            metric.stage_durations,
+            (
+                "stage_1_gen_s",
+                "stage_1_gen_sec",
+                "stage_1_gen_ms",
+                "stage_1",
+                "dit",
+                "diffusion",
+                "image",
+            ),
+        )
+        for metric in successes
     ]
     blocks_per_request = max(1, math.ceil((input_tokens + output_tokens) / 128))
     estimated_max_batch = (num_blocks or 0) // blocks_per_request if num_blocks else 0
@@ -483,6 +541,9 @@ def summarize_results(
         "success_rate": len(successes) / len(metrics) if metrics else 0.0,
         "wall_time_s": wall_time_s,
         "throughput_qps": len(successes) / wall_time_s if wall_time_s > 0.0 else 0.0,
+        "first_event_mean_s": mean(first_events),
+        "first_event_p50_s": percentile(first_events, 0.50),
+        "first_event_p95_s": percentile(first_events, 0.95),
         "ttft_mean_s": mean(ttfts),
         "ttft_p50_s": percentile(ttfts, 0.50),
         "ttft_p95_s": percentile(ttfts, 0.95),
@@ -494,6 +555,8 @@ def summarize_results(
         "peak_memory_mb_max": max(peaks) if peaks else 0.0,
         "ar_delta_mean": mean([float(metric.ar_delta_count) for metric in successes]),
         "ar_text_chars_mean": mean([float(metric.ar_text_chars) for metric in successes]),
+        "response_event_types": union_event_types(metrics),
+        "stage_duration_keys": union_stage_duration_keys(metrics),
         "first_error": next((metric.error for metric in metrics if metric.error), ""),
     }
     result.update(vit_dp_summary)
@@ -552,6 +615,11 @@ def print_result_summary(summary: dict[str, Any]) -> None:
     )
     print(f"wall_time_s={summary['wall_time_s']:.3f} throughput_qps={summary['throughput_qps']:.3f}")
     print(
+        f"first_event_mean_s={summary['first_event_mean_s']:.3f} "
+        f"first_event_p50_s={summary['first_event_p50_s']:.3f} "
+        f"first_event_p95_s={summary['first_event_p95_s']:.3f}"
+    )
+    print(
         f"ttft_mean_s={summary['ttft_mean_s']:.3f} "
         f"ttft_p50_s={summary['ttft_p50_s']:.3f} ttft_p95_s={summary['ttft_p95_s']:.3f}"
     )
@@ -568,6 +636,12 @@ def print_result_summary(summary: dict[str, Any]) -> None:
         f"ar_delta_mean={summary['ar_delta_mean']:.3f} "
         f"ar_text_chars_mean={summary['ar_text_chars_mean']:.3f}"
     )
+    print(f"response_event_types={summary['response_event_types']}")
+    print(f"stage_duration_keys={summary['stage_duration_keys']}")
+    if not summary["stage_duration_keys"]:
+        print("[warning] Response image chunks did not include stage_durations.")
+    elif summary["ar_stage_mean_s"] == 0.0 or summary["dit_stage_mean_s"] == 0.0:
+        print("[warning] stage_durations were returned, but AR or DiT duration keys were not recognized.")
     print(
         "vit_dp_request="
         f"global_batch_max={summary['vit_dp_request_global_batch_max']} "
