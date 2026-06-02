@@ -29,6 +29,16 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DEPLOY_CONFIG = REPO_ROOT / "vllm_omni" / "deploy" / "hunyuan_image3_it2i_npu_aclgraph_rope_vitdp.yaml"
 KV_CACHE_PATTERN = re.compile(r"\[kv-cache-profile\].*?\bnum_blocks=(\d+)\b")
+VIT_DP_SHARD_PATTERN = re.compile(
+    r"HunyuanImage3 AR ViT DP shard:.*?\btp_rank=(\d+).*?\btp_size=(\d+).*?"
+    r"\bglobal_batch=(\d+).*?\blocal_count=(\d+).*?\blocal_batch_size=(\d+)"
+)
+VIT_DP_TIMING_PATTERN = re.compile(
+    r"HunyuanImage3 AR ViT timing:.*?\buse_data_parallel=(True|False).*?"
+    r"\btp_rank=(\d+).*?\btp_size=(\d+).*?\bglobal_batch=(\d+).*?"
+    r"\blocal_count=(\d+).*?\bforward_ms=([0-9.]+).*?"
+    r"\ball_gather_ms=([0-9.]+).*?\btotal_ms=([0-9.]+)"
+)
 
 
 @dataclass
@@ -102,6 +112,46 @@ def mean(values: list[float]) -> float:
 def parse_num_blocks(log_text: str) -> int | None:
     match = KV_CACHE_PATTERN.search(log_text)
     return int(match.group(1)) if match else None
+
+
+def parse_vit_dp_batch_logs(log_text: str) -> dict[str, Any]:
+    shard_records = [
+        {
+            "tp_rank": int(match.group(1)),
+            "tp_size": int(match.group(2)),
+            "global_batch": int(match.group(3)),
+            "local_count": int(match.group(4)),
+            "local_batch_size": int(match.group(5)),
+        }
+        for match in VIT_DP_SHARD_PATTERN.finditer(log_text)
+    ]
+    timing_records = [
+        {
+            "use_data_parallel": match.group(1) == "True",
+            "tp_rank": int(match.group(2)),
+            "tp_size": int(match.group(3)),
+            "global_batch": int(match.group(4)),
+            "local_count": int(match.group(5)),
+            "forward_ms": float(match.group(6)),
+            "all_gather_ms": float(match.group(7)),
+            "total_ms": float(match.group(8)),
+        }
+        for match in VIT_DP_TIMING_PATTERN.finditer(log_text)
+    ]
+    global_batches = [record["global_batch"] for record in shard_records]
+    timing_global_batches = [record["global_batch"] for record in timing_records]
+    local_counts = [record["local_count"] for record in shard_records]
+    timing_totals = [record["total_ms"] for record in timing_records]
+    return {
+        "vit_dp_request_shard_log_count": len(shard_records),
+        "vit_dp_request_timing_log_count": len(timing_records),
+        "vit_dp_request_global_batch_max": max(global_batches or timing_global_batches, default=0),
+        "vit_dp_request_global_batches": sorted(set(global_batches or timing_global_batches)),
+        "vit_dp_request_local_counts": local_counts,
+        "vit_dp_request_nonzero_local_count_logs": sum(1 for value in local_counts if value > 0),
+        "vit_dp_request_timing_total_ms_mean": mean(timing_totals),
+        "vit_dp_request_timing_total_ms_max": max(timing_totals) if timing_totals else 0.0,
+    }
 
 
 def find_stage_value(stage_durations: dict[str, float], candidates: tuple[str, ...]) -> float:
@@ -406,6 +456,7 @@ def summarize_results(
     num_blocks: int | None,
     input_tokens: int,
     output_tokens: int,
+    vit_dp_summary: dict[str, Any],
 ) -> dict[str, Any]:
     successes = [metric for metric in metrics if metric.success]
     ttfts = [metric.ttft_s for metric in successes if metric.ttft_s > 0.0]
@@ -419,7 +470,7 @@ def summarize_results(
     ]
     blocks_per_request = max(1, math.ceil((input_tokens + output_tokens) / 128))
     estimated_max_batch = (num_blocks or 0) // blocks_per_request if num_blocks else 0
-    return {
+    result = {
         "batch_size": batch_size,
         "num_requests": batch_size,
         "num_blocks": num_blocks or 0,
@@ -445,6 +496,8 @@ def summarize_results(
         "ar_text_chars_mean": mean([float(metric.ar_text_chars) for metric in successes]),
         "first_error": next((metric.error for metric in metrics if metric.error), ""),
     }
+    result.update(vit_dp_summary)
+    return result
 
 
 def print_case_config(
@@ -515,6 +568,26 @@ def print_result_summary(summary: dict[str, Any]) -> None:
         f"ar_delta_mean={summary['ar_delta_mean']:.3f} "
         f"ar_text_chars_mean={summary['ar_text_chars_mean']:.3f}"
     )
+    print(
+        "vit_dp_request="
+        f"global_batch_max={summary['vit_dp_request_global_batch_max']} "
+        f"global_batches={summary['vit_dp_request_global_batches']} "
+        f"shard_logs={summary['vit_dp_request_shard_log_count']} "
+        f"timing_logs={summary['vit_dp_request_timing_log_count']} "
+        f"nonzero_local_count_logs={summary['vit_dp_request_nonzero_local_count_logs']}"
+    )
+    print(
+        "vit_dp_timing="
+        f"total_ms_mean={summary['vit_dp_request_timing_total_ms_mean']:.3f} "
+        f"total_ms_max={summary['vit_dp_request_timing_total_ms_max']:.3f}"
+    )
+    if summary["vit_dp_request_shard_log_count"] == 0:
+        print("[warning] No request-stage AR ViT DP shard logs found. Check server_log directly.")
+    elif summary["vit_dp_request_global_batch_max"] < summary["batch_size"]:
+        print(
+            "[warning] Request-stage AR ViT global_batch is smaller than batch_size. "
+            "For online tests, ensure stage max_num_seqs and edge max_inflight both equal batch_size."
+        )
     if summary["first_error"]:
         print(f"first_error={summary['first_error']}")
 
@@ -618,16 +691,21 @@ def main(argv: list[str] | None = None) -> int:
     server = ManagedServer(model=args.model, deploy_config=run_deploy_config, host=args.host, port=args.port, log_file=log_file)
     metrics: list[RequestMetric] = []
     wall_time_s = 0.0
+    request_log_start = 0
+    vit_dp_summary: dict[str, Any] = parse_vit_dp_batch_logs("")
     try:
         server.start()
         server.wait_ready(args.server_timeout_s)
         log_text = server.read_log()
         num_blocks = parse_num_blocks(log_text)
+        request_log_start = len(log_text)
         wall_time_s, metrics = asyncio.run(run_batch_requests(args, batch_size))
-        log_text = server.read_log()
-        num_blocks = parse_num_blocks(log_text) or num_blocks
     finally:
         server.stop()
+    log_text = server.read_log()
+    num_blocks = parse_num_blocks(log_text) or num_blocks
+    request_log_text = log_text[request_log_start:]
+    vit_dp_summary = parse_vit_dp_batch_logs(request_log_text)
 
     result = summarize_results(
         batch_size=batch_size,
@@ -636,6 +714,7 @@ def main(argv: list[str] | None = None) -> int:
         num_blocks=num_blocks,
         input_tokens=args.input_tokens,
         output_tokens=args.output_tokens,
+        vit_dp_summary=vit_dp_summary,
     )
     write_outputs(
         output_dir,
