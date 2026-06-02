@@ -153,6 +153,22 @@ def _build_capture_sizes(concurrency: int) -> list[int]:
     return sorted(values)
 
 
+def render_single_run_config(
+    base_config: dict[str, Any],
+    *,
+    batch_size: int,
+    ar_gpu_memory_utilization: float,
+    dit_gpu_memory_utilization: float,
+) -> dict[str, Any]:
+    return apply_deploy_overrides(
+        json.loads(json.dumps(base_config)),
+        batch_size=batch_size,
+        ar_gpu_memory_utilization=ar_gpu_memory_utilization,
+        dit_gpu_memory_utilization=dit_gpu_memory_utilization,
+        cudagraph_capture_sizes=_build_capture_sizes(batch_size),
+    )
+
+
 def _write_summary_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     if not rows:
         return
@@ -482,6 +498,18 @@ def cmd_prepare_configs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_render_config(args: argparse.Namespace) -> int:
+    base_config = _load_yaml(Path(args.base_config))
+    rendered = render_single_run_config(
+        base_config,
+        batch_size=args.batch_size,
+        ar_gpu_memory_utilization=args.ar_gpu_memory_utilization,
+        dit_gpu_memory_utilization=args.dit_gpu_memory_utilization,
+    )
+    _dump_yaml(Path(args.output_path), rendered)
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     base_config = _load_yaml(Path(args.base_config))
     results_dir = Path(args.results_dir)
@@ -616,6 +644,14 @@ def build_parser() -> argparse.ArgumentParser:
         default="vllm_omni/deploy/experiments/hunyuan_image3_it2i_npu",
     )
     prepare.set_defaults(func=cmd_prepare_configs)
+
+    render = subparsers.add_parser("render-config")
+    render.add_argument("--base-config", default="vllm_omni/deploy/hunyuan_image3_it2i_npu_aclgraph_rope_vitdp.yaml")
+    render.add_argument("--output-path", required=True)
+    render.add_argument("--batch-size", type=int, required=True)
+    render.add_argument("--ar-gpu-memory-utilization", type=float, default=0.78)
+    render.add_argument("--dit-gpu-memory-utilization", type=float, default=0.66)
+    render.set_defaults(func=cmd_render_config)
 
     run = subparsers.add_parser("run")
     run.add_argument("--base-config", default="vllm_omni/deploy/hunyuan_image3_it2i_npu_aclgraph_rope_vitdp.yaml")

@@ -9,6 +9,7 @@ from tools.hunyuan_image3_it2i_npu_experiment import (
     build_concurrency_values,
     estimate_max_concurrency,
     parse_num_blocks_from_log,
+    render_single_run_config,
 )
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
@@ -76,3 +77,27 @@ def test_apply_deploy_overrides_enables_graph_rope_vit_dp_and_batch_alignment() 
         "cudagraph_capture_sizes": [14, 15, 16, 17, 18],
     }
     assert ar_stage["hf_overrides"]["rope_parameters"]["rope_type"] == "default"
+
+
+def test_render_single_run_config_uses_requested_batch_and_memory_values() -> None:
+    base = {
+        "pipeline": "hunyuan_image_3_moe",
+        "stages": [
+            {"stage_id": 0, "max_num_seqs": 1, "gpu_memory_utilization": 0.8},
+            {"stage_id": 1, "max_num_seqs": 1, "gpu_memory_utilization": 0.65},
+        ],
+        "edges": [{"from": 0, "to": 1}],
+    }
+
+    rendered = render_single_run_config(
+        copy.deepcopy(base),
+        batch_size=12,
+        ar_gpu_memory_utilization=0.79,
+        dit_gpu_memory_utilization=0.67,
+    )
+
+    assert rendered["stages"][0]["max_num_seqs"] == 12
+    assert rendered["stages"][1]["max_num_seqs"] == 12
+    assert rendered["stages"][0]["gpu_memory_utilization"] == pytest.approx(0.79)
+    assert rendered["stages"][1]["gpu_memory_utilization"] == pytest.approx(0.67)
+    assert rendered["stages"][0]["compilation_config"]["cudagraph_capture_sizes"] == [10, 11, 12, 13, 14]
