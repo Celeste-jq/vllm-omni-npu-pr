@@ -182,6 +182,11 @@ AGENTS.md
 
 # scripts
 /scripts/
+!/scripts/
+!/scripts/prepare_hunyuan_image3_it2i_npu_configs.sh
+!/scripts/run_hunyuan_image3_it2i_npu_probe.sh
+!/scripts/run_hunyuan_image3_it2i_npu_single.sh
+!/scripts/run_hunyuan_image3_it2i_npu_sweep.sh
 
 # PyCharm
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can

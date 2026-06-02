@@ -69,6 +69,19 @@ class OmniGPUModelRunner(GPUModelRunner):
         """
         super().initialize_metadata_builders(kv_cache_config, kernel_block_sizes)
 
+        if getattr(self, "rank", None) == 0:
+            logger.info(
+                "[kv-cache-profile] rank=%s runner=%s stage_id=%s num_blocks=%s block_size=%s max_num_seqs=%s "
+                "gpu_memory_utilization=%s",
+                getattr(self, "rank", None),
+                type(self).__name__,
+                getattr(getattr(self, "vllm_config", None), "stage_id", None),
+                getattr(kv_cache_config, "num_blocks", None),
+                getattr(getattr(self, "cache_config", None), "block_size", None),
+                getattr(getattr(self, "scheduler_config", None), "max_num_seqs", None),
+                getattr(getattr(self, "cache_config", None), "gpu_memory_utilization", None),
+            )
+
         for kv_cache_group in self.attn_groups:
             for attn_group in kv_cache_group:
                 for builder in attn_group.metadata_builders:

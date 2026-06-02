@@ -2808,6 +2808,8 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                         size=size,
                         created=created,
                         model=model,
+                        stage_durations=getattr(output, "stage_durations", {}) or {},
+                        peak_memory_mb=float(getattr(output, "peak_memory_mb", 0.0) or 0.0),
                     )
                     yield f"data: {chunk.model_dump_json()}\n\n"
                     emitted_image = True

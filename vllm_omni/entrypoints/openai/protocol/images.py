@@ -175,6 +175,14 @@ class ImageGenerationResponse(BaseModel):
         description="Chain-of-thought text output from the AR stage. "
         "Only present for image editing (IT2I) with CoT-enabled models.",
     )
+    stage_durations: dict[str, float] = Field(
+        default_factory=dict,
+        description="Profiler stage durations reported by the diffusion pipeline.",
+    )
+    peak_memory_mb: float = Field(
+        default=0.0,
+        description="Peak device memory usage in MB reported by the diffusion pipeline.",
+    )
 
 
 class ImageEditARDeltaChunk(BaseModel):
@@ -198,6 +206,14 @@ class ImageEditImageChunk(BaseModel):
     size: str = Field(..., description="The generated image size")
     created: int = Field(..., description="Unix timestamp of when the stream was created")
     model: str = Field(..., description="Model used for the image edit request")
+    stage_durations: dict[str, float] = Field(
+        default_factory=dict,
+        description="Profiler stage durations reported by the diffusion pipeline.",
+    )
+    peak_memory_mb: float = Field(
+        default=0.0,
+        description="Peak device memory usage in MB reported by the diffusion pipeline.",
+    )
 
 
 class ImageEditStreamError(BaseModel):

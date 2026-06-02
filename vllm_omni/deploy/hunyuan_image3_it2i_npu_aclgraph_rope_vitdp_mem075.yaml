@@ -1,0 +1,69 @@
+# Conservative NPU IT2I experiment preset.
+pipeline: hunyuan_image_3_moe
+async_chunk: false
+trust_remote_code: true
+
+connectors:
+  shared_memory_connector:
+    name: SharedMemoryConnector
+    extra:
+      shm_threshold_bytes: 65536
+
+stages:
+  - stage_id: 0
+    is_comprehension: true
+    final_output: true
+    final_output_type: text
+    max_num_seqs: 1
+    gpu_memory_utilization: 0.75
+    enforce_eager: false
+    trust_remote_code: true
+    max_num_batched_tokens: 8192
+    devices: "0,1,2,3"
+    tensor_parallel_size: 4
+    mm_encoder_tp_mode: data
+    hf_overrides:
+      rope_parameters:
+        mrope_section: [0, 32, 32]
+        rope_type: default
+    compilation_config:
+      cudagraph_mode: FULL_DECODE_ONLY
+      cudagraph_capture_sizes: [1, 2]
+    omni_kv_config:
+      need_send_cache: true
+    output_connectors:
+      to_stage_1: shared_memory_connector
+    default_sampling_params:
+      temperature: 0.0
+      top_p: 1
+      top_k: -1
+      max_tokens: 8192
+      detokenize: true
+      skip_special_tokens: false
+
+  - stage_id: 1
+    max_num_seqs: 1
+    gpu_memory_utilization: 0.63
+    enforce_eager: true
+    trust_remote_code: true
+    devices: "4,5,6,7"
+    distributed_executor_backend: mp
+    max_num_batched_tokens: 8192
+    omni_kv_config:
+      need_recv_cache: true
+    parallel_config:
+      tensor_parallel_size: 4
+      enable_expert_parallel: false
+      sequence_parallel_size: 1
+      ulysses_degree: 1
+    input_connectors:
+      from_stage_0: shared_memory_connector
+    default_sampling_params:
+      num_inference_steps: 50
+      guidance_scale: 5.0
+
+edges:
+  - from: 0
+    to: 1
+    window_size: -1
+    max_inflight: 1
