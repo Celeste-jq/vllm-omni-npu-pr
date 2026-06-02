@@ -2315,6 +2315,9 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         """Build the shared multistage generation prompt and stage params."""
         stage_configs = getattr(engine, "stage_configs", None) or []
         default_params_list = get_default_sampling_params_list(engine)
+        od_config = resolve_diffusion_od_config(self.engine_client, self._diffusion_engine)
+        od_model_class_name = getattr(od_config, "model_class_name", None) or ""
+        diffusion_model_name = self._diffusion_model_name or ""
         is_hunyuan_image3 = any(
             (
                 getattr(stage, "model_arch", None)
@@ -2323,6 +2326,8 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
             )
             in {"HunyuanImage3ForConditionalGeneration", "HunyuanImage3ForCausalMM"}
             for stage in stage_configs
+        ) or od_model_class_name in {"HunyuanImage3ForConditionalGeneration", "HunyuanImage3ForCausalMM"} or (
+            "hunyuanimage3" in diffusion_model_name.lower().replace("-", "")
         )
 
         height = gen_params.height
@@ -2363,7 +2368,8 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
 
         logger.info(
             "[HunyuanImage3 online debug] build inputs: bot_task=%r sys_type=%r "
-            "custom_system_prompt=%s height=%r width=%r num_reference_images=%d tokenizer=%s",
+            "custom_system_prompt=%s height=%r width=%r num_reference_images=%d tokenizer=%s "
+            "is_hunyuan_image3=%s od_model_class_name=%r diffusion_model_name=%r",
             bot_task,
             use_system_prompt,
             custom_system_prompt is not None,
@@ -2371,6 +2377,9 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
             width,
             len(reference_images),
             type(tokenizer).__name__ if tokenizer is not None else None,
+            is_hunyuan_image3,
+            od_model_class_name,
+            diffusion_model_name,
         )
 
         if bot_task is not None or use_system_prompt is not None or custom_system_prompt is not None:

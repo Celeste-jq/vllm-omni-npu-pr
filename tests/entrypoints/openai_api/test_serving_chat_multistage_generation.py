@@ -126,6 +126,38 @@ def test_build_multistage_generation_inputs_hunyuan_image3_single_edit_uses_imag
     assert "img2img" not in engine_prompt["multi_modal_data"]
 
 
+def test_build_multistage_generation_inputs_hunyuan_image3_single_edit_uses_image_modality_from_model_name(
+    serving_chat,
+):
+    from vllm_omni.entrypoints.openai.serving_chat import OmniOpenAIServingChat
+
+    serving_chat._diffusion_model_name = "tencent/HunyuanImage-3.0-Instruct"
+    engine = SimpleNamespace(
+        stage_configs=[
+            SimpleNamespace(stage_type="llm", is_comprehension=True),
+            SimpleNamespace(stage_type="diffusion", is_comprehension=False),
+        ],
+        default_sampling_params_list=[
+            SamplingParams(temperature=0.0),
+            OmniDiffusionSamplingParams(),
+        ],
+    )
+    reference_image = Image.new("RGB", (24, 24), color="green")
+
+    engine_prompt, _ = OmniOpenAIServingChat._build_multistage_generation_inputs(
+        serving_chat,
+        engine=engine,
+        prompt="edit a dog poster",
+        extra_body={},
+        reference_images=[reference_image],
+        gen_params=OmniDiffusionSamplingParams(),
+    )
+
+    assert engine_prompt["modalities"] == ["image"]
+    assert engine_prompt["multi_modal_data"]["image"].size == (24, 24)
+    assert "img2img" not in engine_prompt["multi_modal_data"]
+
+
 def test_build_multistage_generation_inputs_multi_image_emits_n_img_placeholders(serving_chat):
     """N reference images with bot_task set must emit N <img> placeholders.
 
