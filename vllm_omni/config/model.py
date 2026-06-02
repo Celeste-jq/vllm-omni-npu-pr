@@ -284,10 +284,11 @@ class OmniModelConfig(ModelConfig):
         NOTE: This assumes add_defaults_to_omni_kwargs has already been called,
         so that all omni fields are present in the provided omni_kwargs.
         """
-        omni_fields = set(cls.__dataclass_fields__) - set(ModelConfig.__dataclass_fields__)
+        all_fields = set(cls.__dataclass_fields__)
+        omni_fields = all_fields - set(ModelConfig.__dataclass_fields__)
 
         for key, value in omni_kwargs.items():
-            if key not in omni_fields:
+            if key not in all_fields:
                 raise ValueError(f"Unexpected omni kwarg: {key}")
 
             field_type = cls.__dataclass_fields__[key].type

@@ -96,6 +96,14 @@ def test_from_vllm_config_validates_invalid_omni_kwargs():
         OmniModelConfig.from_vllm_model_config(model_config, foo="bar")
 
 
+def test_from_vllm_config_accepts_model_config_field_overrides():
+    """Existing ModelConfig fields may be forwarded as explicit overrides."""
+    model_config = EngineArgs().create_model_config()
+    cfg = OmniModelConfig.from_vllm_model_config(model_config, model="override-model")
+
+    assert cfg.model == "override-model"
+
+
 def test_from_vllm_config_validates_bad_omni_kwarg_types():
     """Ensure omni-specific field validation catches type errors."""
     model_config = EngineArgs().create_model_config()
