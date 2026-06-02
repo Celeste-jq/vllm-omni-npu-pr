@@ -40,6 +40,10 @@ VIT_DP_TIMING_PATTERN = re.compile(
     r"\blocal_count=(\d+).*?\bforward_ms=([0-9.]+).*?"
     r"\ball_gather_ms=([0-9.]+).*?\btotal_ms=([0-9.]+)"
 )
+VIT_DP_ENCODE_STATE_PATTERN = re.compile(
+    r"HunyuanImage3 AR ViT encode state:.*?\buse_data_parallel=(True|False).*?"
+    r"\btp_rank=(\d+).*?\btp_size=(\d+).*?\bbatch_size=(\d+)"
+)
 
 
 @dataclass
@@ -142,15 +146,27 @@ def parse_vit_dp_batch_logs(log_text: str) -> dict[str, Any]:
         }
         for match in VIT_DP_TIMING_PATTERN.finditer(log_text)
     ]
+    encode_state_records = [
+        {
+            "use_data_parallel": match.group(1) == "True",
+            "tp_rank": int(match.group(2)),
+            "tp_size": int(match.group(3)),
+            "global_batch": int(match.group(4)),
+        }
+        for match in VIT_DP_ENCODE_STATE_PATTERN.finditer(log_text)
+    ]
     global_batches = [record["global_batch"] for record in shard_records]
     timing_global_batches = [record["global_batch"] for record in timing_records]
+    encode_state_global_batches = [record["global_batch"] for record in encode_state_records]
     local_counts = [record["local_count"] for record in shard_records]
     timing_totals = [record["total_ms"] for record in timing_records]
+    fallback_global_batches = global_batches or timing_global_batches or encode_state_global_batches
     return {
         "vit_dp_request_shard_log_count": len(shard_records),
         "vit_dp_request_timing_log_count": len(timing_records),
-        "vit_dp_request_global_batch_max": max(global_batches or timing_global_batches, default=0),
-        "vit_dp_request_global_batches": sorted(set(global_batches or timing_global_batches)),
+        "vit_dp_request_encode_state_log_count": len(encode_state_records),
+        "vit_dp_request_global_batch_max": max(fallback_global_batches, default=0),
+        "vit_dp_request_global_batches": sorted(set(fallback_global_batches)),
         "vit_dp_request_local_counts": local_counts,
         "vit_dp_request_nonzero_local_count_logs": sum(1 for value in local_counts if value > 0),
         "vit_dp_request_timing_total_ms_mean": mean(timing_totals),
@@ -701,6 +717,7 @@ def print_result_summary(summary: dict[str, Any]) -> None:
         f"global_batch_max={summary['vit_dp_request_global_batch_max']} "
         f"global_batches={summary['vit_dp_request_global_batches']} "
         f"shard_logs={summary['vit_dp_request_shard_log_count']} "
+        f"encode_state_logs={summary['vit_dp_request_encode_state_log_count']} "
         f"timing_logs={summary['vit_dp_request_timing_log_count']} "
         f"nonzero_local_count_logs={summary['vit_dp_request_nonzero_local_count_logs']}"
     )
@@ -711,6 +728,8 @@ def print_result_summary(summary: dict[str, Any]) -> None:
     )
     if summary["vit_dp_request_shard_log_count"] == 0:
         print("[warning] No request-stage AR ViT DP shard logs found. Check server_log directly.")
+    if summary["vit_dp_request_encode_state_log_count"] == 0:
+        print("[warning] No request-stage AR ViT DP encode-state logs found. Check server_log directly.")
     elif summary["vit_dp_request_global_batch_max"] < summary["batch_size"]:
         print(
             "[warning] Request-stage AR ViT global_batch is smaller than batch_size. "
@@ -851,6 +870,8 @@ def main(argv: list[str] | None = None) -> int:
     num_blocks = parse_num_blocks(log_text) or num_blocks
     request_log_text = log_text[request_log_start:]
     vit_dp_summary = parse_vit_dp_batch_logs(request_log_text)
+    if vit_dp_summary["vit_dp_request_shard_log_count"] == 0 and vit_dp_summary["vit_dp_request_encode_state_log_count"] == 0:
+        vit_dp_summary = parse_vit_dp_batch_logs(log_text)
 
     result = summarize_results(
         batch_size=batch_size,
