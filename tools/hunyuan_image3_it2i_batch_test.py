@@ -18,6 +18,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -190,12 +191,12 @@ class ManagedServer:
         self.port = port
         self.log_file = log_file
         self.process: subprocess.Popen[str] | None = None
+        self._log_thread: threading.Thread | None = None
 
     def start(self) -> None:
         self.log_file.parent.mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
         env["TASKQUEUEENABLE"] = "1"
-        log_handle = self.log_file.open("w", encoding="utf-8")
         cmd = [
             "vllm",
             "serve",
@@ -211,12 +212,24 @@ class ManagedServer:
         print("[server] " + " ".join(cmd), flush=True)
         self.process = subprocess.Popen(  # noqa: S603
             cmd,
-            stdout=log_handle,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            bufsize=1,
             env=env,
             cwd=str(REPO_ROOT),
         )
+        self._log_thread = threading.Thread(target=self._stream_logs, name="server-log-stream", daemon=True)
+        self._log_thread.start()
+
+    def _stream_logs(self) -> None:
+        if self.process is None or self.process.stdout is None:
+            return
+        with self.log_file.open("w", encoding="utf-8") as log_handle:
+            for line in self.process.stdout:
+                log_handle.write(line)
+                log_handle.flush()
+                print(line, end="", flush=True)
 
     def stop(self) -> None:
         if self.process is None:
@@ -228,6 +241,8 @@ class ManagedServer:
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait(timeout=10)
+        if self._log_thread is not None:
+            self._log_thread.join(timeout=5)
 
     def read_log(self) -> str:
         if not self.log_file.exists():
