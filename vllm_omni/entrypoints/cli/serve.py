@@ -749,6 +749,8 @@ def run_headless(args: argparse.Namespace) -> None:
 
     args_dict = vars(args).copy()
     args_dict.pop("_cli_explicit_keys", None)
+    if "mm_encoder_tp_mode" not in explicit_cli_keys:
+        args_dict.pop("mm_encoder_tp_mode", None)
     # Forward ``--deploy-config`` so the headless reads the same YAML the
     # head was launched with — otherwise ``load_and_resolve_stage_configs``
     # falls back to ``vllm_omni/deploy/<model>.yaml`` and the headless's

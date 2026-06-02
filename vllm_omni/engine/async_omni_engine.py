@@ -2040,7 +2040,9 @@ class AsyncOmniEngine:
         stage_configs_path = kwargs.get("stage_configs_path", None)
         deploy_config_path = kwargs.pop("deploy_config", None)
         stage_overrides_json = kwargs.pop("stage_overrides", None)
-        kwargs.pop("_cli_explicit_keys", None)
+        cli_explicit_keys = kwargs.pop("_cli_explicit_keys", None) or set()
+        if "mm_encoder_tp_mode" not in cli_explicit_keys:
+            kwargs.pop("mm_encoder_tp_mode", None)
         explicit_stage_configs = kwargs.pop("stage_configs", None)
         if explicit_stage_configs is not None:
             logger.warning(
