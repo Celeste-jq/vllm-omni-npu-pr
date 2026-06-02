@@ -161,11 +161,17 @@ class RotaryEmbedding(CustomOp):
         sin: torch.Tensor,
     ) -> torch.Tensor:
         if self.has_mindie:
-            x, squeezed = _ensure_batch_dim(x)
-            output = apply_rotary_emb_mindiesd(x, cos, sin, self.interleaved)
-            return _restore_batch_dim(output, squeezed)
-        else:
-            return self.forward_native(x, cos, sin)
+            try:
+                x, squeezed = _ensure_batch_dim(x)
+                output = apply_rotary_emb_mindiesd(x, cos, sin, self.interleaved)
+                return _restore_batch_dim(output, squeezed)
+            except (ImportError, ModuleNotFoundError, OSError) as exc:
+                self.has_mindie = False
+                logger.warning(
+                    "MindIE-SD rotary embedding is unavailable, falling back to native torch RoPE: %s",
+                    exc,
+                )
+        return self.forward_native(x, cos, sin)
 
     def forward_xpu(
         self,
@@ -254,12 +260,18 @@ class RotaryEmbeddingWan(RotaryEmbedding):
         sin: torch.Tensor,
     ) -> torch.Tensor:
         if self.has_mindie:
-            if cos.dim() > 2:
-                cos = cos.reshape(-1, cos.shape[-1])
-                sin = sin.reshape(-1, sin.shape[-1])
-            return apply_rotary_emb_mindiesd(x, cos, sin, self.interleaved, self.half_head_dim)
-        else:
-            return self.forward_native(x, cos, sin)
+            try:
+                if cos.dim() > 2:
+                    cos = cos.reshape(-1, cos.shape[-1])
+                    sin = sin.reshape(-1, sin.shape[-1])
+                return apply_rotary_emb_mindiesd(x, cos, sin, self.interleaved, self.half_head_dim)
+            except (ImportError, ModuleNotFoundError, OSError) as exc:
+                self.has_mindie = False
+                logger.warning(
+                    "MindIE-SD rotary embedding is unavailable, falling back to native torch RoPE: %s",
+                    exc,
+                )
+        return self.forward_native(x, cos, sin)
 
     def forward_native(
         self,
