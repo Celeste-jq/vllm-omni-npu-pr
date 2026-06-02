@@ -18,7 +18,11 @@ from pathlib import Path
 from typing import Any
 
 
-KV_CACHE_PATTERN = re.compile(r"\[kv-cache-profile\].*?\bnum_blocks=(\d+)\b")
+KV_CACHE_PATTERNS = (
+    re.compile(r"\[kv-cache-profile\].*?\bnum_blocks=(\d+)\b"),
+    re.compile(r"\bnum_blocks=(\d+)\b"),
+    re.compile(r"\bnum_blocks:\s*(\d+)\b"),
+)
 
 
 def estimate_max_concurrency(
@@ -52,8 +56,11 @@ def build_concurrency_values(target: int, maximum: int) -> list[int]:
 
 
 def parse_num_blocks_from_log(text: str) -> int | None:
-    match = KV_CACHE_PATTERN.search(text)
-    return int(match.group(1)) if match else None
+    for pattern in KV_CACHE_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return int(match.group(1))
+    return None
 
 
 def apply_deploy_overrides(

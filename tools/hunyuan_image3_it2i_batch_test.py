@@ -29,7 +29,11 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DEPLOY_CONFIG = REPO_ROOT / "vllm_omni" / "deploy" / "hunyuan_image3_it2i_npu_aclgraph_rope_vitdp.yaml"
-KV_CACHE_PATTERN = re.compile(r"\[kv-cache-profile\].*?\bnum_blocks=(\d+)\b")
+KV_CACHE_PATTERNS = (
+    re.compile(r"\[kv-cache-profile\].*?\bnum_blocks=(\d+)\b"),
+    re.compile(r"\bnum_blocks=(\d+)\b"),
+    re.compile(r"\bnum_blocks:\s*(\d+)\b"),
+)
 VIT_DP_SHARD_PATTERN = re.compile(
     r"HunyuanImage3 AR ViT DP shard:.*?\btp_rank=(\d+).*?\btp_size=(\d+).*?"
     r"\bglobal_batch=(\d+).*?\blocal_count=(\d+).*?\blocal_batch_size=(\d+)"
@@ -118,8 +122,11 @@ def mean(values: list[float]) -> float:
 
 
 def parse_num_blocks(log_text: str) -> int | None:
-    match = KV_CACHE_PATTERN.search(log_text)
-    return int(match.group(1)) if match else None
+    for pattern in KV_CACHE_PATTERNS:
+        match = pattern.search(log_text)
+        if match:
+            return int(match.group(1))
+    return None
 
 
 def parse_vit_dp_batch_logs(log_text: str) -> dict[str, Any]:
@@ -592,6 +599,7 @@ def summarize_results(
         "output_tokens": output_tokens,
         "blocks_per_request": blocks_per_request,
         "estimated_max_batch": estimated_max_batch,
+        "max_concurrency": estimated_max_batch,
         "success": len(successes),
         "fail": len(metrics) - len(successes),
         "success_rate": len(successes) / len(metrics) if metrics else 0.0,
@@ -736,7 +744,7 @@ def print_result_summary(summary: dict[str, Any]) -> None:
     print(
         f"num_blocks={summary['num_blocks']} input_tokens={summary['input_tokens']} "
         f"output_tokens={summary['output_tokens']} blocks_per_request={summary['blocks_per_request']} "
-        f"estimated_max_batch={summary['estimated_max_batch']}"
+        f"estimated_max_batch={summary['estimated_max_batch']} max_concurrency={summary['max_concurrency']}"
     )
     print(f"wall_time_s={summary['wall_time_s']:.3f} throughput_qps={summary['throughput_qps']:.3f}")
     print(
