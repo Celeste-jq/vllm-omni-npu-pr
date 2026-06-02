@@ -181,6 +181,23 @@ def merge_kv_cache_profile(previous: dict[str, Any], current: dict[str, Any]) ->
     return previous
 
 
+def print_kv_cache_profile(profile: dict[str, Any], *, phase: str) -> None:
+    print(f"\n========== kv cache profile ({phase}) ==========")
+    print(f"num_blocks={profile.get('num_blocks', 0)}")
+    print(f"block_size={profile.get('block_size', 128)}")
+    print(f"kv_cache_profile_found={str(bool(profile.get('kv_cache_profile_found'))).lower()}")
+    print(f"kv_cache_profile_source={profile.get('kv_cache_profile_source', 'missing')}")
+    if not profile.get("num_blocks", 0):
+        print("[warning] num_blocks is missing. Check whether the actual NPU runner printed kv_cache_config/num_blocks.")
+        candidates = profile.get("kv_cache_log_candidates") or []
+        if candidates:
+            print("kv_cache_log_candidates:")
+            for line in candidates:
+                print(f"  {line}")
+        else:
+            print("[warning] No num_blocks/num_gpu_blocks/kv-cache-profile lines found in server_log so far.")
+
+
 def parse_vit_dp_batch_logs(log_text: str) -> dict[str, Any]:
     shard_records = [
         {
@@ -644,7 +661,14 @@ def summarize_results(
     ]
     block_size = kv_cache_profile.get("block_size") or 128
     num_blocks = kv_cache_profile.get("num_blocks") or 0
-    tokens_per_request = input_tokens + output_tokens
+    observed_output_tokens_for_capacity = max(observed_ar_output_tokens, default=0)
+    output_tokens_for_capacity = observed_output_tokens_for_capacity or output_tokens
+    output_tokens_for_capacity_source = (
+        "server_log_ar2diffusion"
+        if observed_output_tokens_for_capacity
+        else "cli_estimate_for_max_concurrency"
+    )
+    tokens_per_request = input_tokens + output_tokens_for_capacity
     blocks_per_request = max(1, math.ceil(tokens_per_request / block_size))
     estimated_max_batch = num_blocks // blocks_per_request if num_blocks else 0
     result = {
@@ -659,14 +683,16 @@ def summarize_results(
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "input_tokens_source": "cli_estimate",
-        "output_tokens_source": "cli_estimate_for_max_concurrency",
+        "output_tokens_source": "cli_default",
+        "output_tokens_for_capacity": output_tokens_for_capacity,
+        "output_tokens_for_capacity_source": output_tokens_for_capacity_source,
         "observed_ar_output_tokens": observed_ar_output_tokens,
         "observed_ar_output_tokens_mean": mean([float(value) for value in observed_ar_output_tokens]),
         "observed_ar_output_tokens_max": max(observed_ar_output_tokens, default=0),
         "observed_ar_output_tokens_source": "server_log_ar2diffusion" if observed_ar_output_tokens else "missing",
         "tokens_per_request": tokens_per_request,
         "blocks_per_request": blocks_per_request,
-        "max_concurrency_formula": "num_blocks // ceil((input_tokens + output_tokens) / block_size)",
+        "max_concurrency_formula": "num_blocks // ceil((input_tokens + output_tokens_for_capacity) / block_size)",
         "estimated_max_batch": estimated_max_batch,
         "max_concurrency": estimated_max_batch,
         "success": len(successes),
@@ -823,16 +849,18 @@ def print_result_summary(summary: dict[str, Any]) -> None:
     print(f"num_blocks={summary['num_blocks']}")
     print(f"block_size={summary['block_size']}")
     print(f"input_tokens={summary['input_tokens']}")
-    print(f"output_tokens={summary['output_tokens']}")
+    print(f"output_tokens_cli_default={summary['output_tokens']}")
+    print(f"output_tokens_for_capacity={summary['output_tokens_for_capacity']}")
     print(f"input_tokens_source={summary['input_tokens_source']}")
     print(f"output_tokens_source={summary['output_tokens_source']}")
+    print(f"output_tokens_for_capacity_source={summary['output_tokens_for_capacity_source']}")
     print(
         f"observed_ar_output_tokens={summary['observed_ar_output_tokens']} "
         f"mean={summary['observed_ar_output_tokens_mean']:.3f} "
         f"max={summary['observed_ar_output_tokens_max']} "
         f"source={summary['observed_ar_output_tokens_source']}"
     )
-    print(f"tokens_per_request=input_tokens+output_tokens={summary['tokens_per_request']}")
+    print(f"tokens_per_request=input_tokens+output_tokens_for_capacity={summary['tokens_per_request']}")
     print(f"blocks_per_request=ceil(tokens_per_request/block_size)={summary['blocks_per_request']}")
     print(f"max_concurrency=num_blocks//blocks_per_request={summary['max_concurrency']}")
     print(
@@ -841,7 +869,7 @@ def print_result_summary(summary: dict[str, Any]) -> None:
     )
     print(
         f"num_blocks={summary['num_blocks']} block_size={summary['block_size']} input_tokens={summary['input_tokens']} "
-        f"output_tokens={summary['output_tokens']} blocks_per_request={summary['blocks_per_request']} "
+        f"output_tokens_for_capacity={summary['output_tokens_for_capacity']} blocks_per_request={summary['blocks_per_request']} "
         f"estimated_max_batch={summary['estimated_max_batch']} max_concurrency={summary['max_concurrency']}"
     )
     if summary["num_blocks"] == 0:
@@ -1034,6 +1062,7 @@ def main(argv: list[str] | None = None) -> int:
         server.wait_ready(args.server_timeout_s)
         log_text = server.read_log()
         kv_cache_profile = parse_kv_cache_profile(log_text)
+        print_kv_cache_profile(kv_cache_profile, phase="after server ready")
         if args.warmup_runs > 0:
             print(f"[warmup] runs={args.warmup_runs} batch_size={batch_size}")
             for warmup_idx in range(args.warmup_runs):
@@ -1051,6 +1080,7 @@ def main(argv: list[str] | None = None) -> int:
         server.stop()
     log_text = server.read_log()
     kv_cache_profile = merge_kv_cache_profile(kv_cache_profile, parse_kv_cache_profile(log_text))
+    print_kv_cache_profile(kv_cache_profile, phase="final")
     request_log_text = log_text[request_log_start:]
     vit_dp_summary = parse_vit_dp_batch_logs(request_log_text)
     if vit_dp_summary["vit_dp_request_shard_log_count"] == 0 and vit_dp_summary["vit_dp_request_encode_state_log_count"] == 0:
