@@ -191,6 +191,7 @@ def config_summary(config: dict[str, Any]) -> dict[str, Any]:
     edge = edges[0] if edges and isinstance(edges[0], dict) else {}
     rope_parameters = (ar_stage.get("hf_overrides") or {}).get("rope_parameters") or {}
     compilation = ar_stage.get("compilation_config") or {}
+    ar_sampling = ar_stage.get("default_sampling_params") or {}
     return {
         "pipeline": config.get("pipeline", ""),
         "ar_max_num_seqs": ar_stage.get("max_num_seqs"),
@@ -209,6 +210,7 @@ def config_summary(config: dict[str, Any]) -> dict[str, Any]:
         "ar_vit_dp_enabled": ar_stage.get("mm_encoder_tp_mode") == "data",
         "mm_encoder_tp_mode": ar_stage.get("mm_encoder_tp_mode"),
         "ar_profiler_config": ar_stage.get("profiler_config"),
+        "ar_max_tokens": ar_sampling.get("max_tokens"),
     }
 
 
@@ -600,6 +602,23 @@ def print_case_config(
         )
     if summary["edge_max_inflight"] not in (None, batch_size):
         print("[warning] YAML edge max_inflight does not match batch_size.")
+    if batch_size >= 16 and summary["dit_max_num_seqs"] and summary["dit_max_num_seqs"] >= batch_size:
+        print(
+            "[warning] batch_size >= 16 with DiT max_num_seqs >= batch_size is likely to OOM. "
+            "If OOM happens during diffusion steps, lower stage 1 max_num_seqs and edge max_inflight first."
+        )
+    if summary["cudagraph_capture_sizes"]:
+        large_capture_sizes = [size for size in summary["cudagraph_capture_sizes"] if isinstance(size, int) and size >= batch_size]
+        if batch_size >= 16 and large_capture_sizes:
+            print(
+                "[warning] cudagraph_capture_sizes includes batch-size graph capture. "
+                "If OOM happens during graph capture, remove large capture sizes and keep [1, 2, 4, 8]."
+            )
+    if summary.get("ar_max_tokens", 0) and summary["ar_max_tokens"] > 2048:
+        print(
+            "[warning] AR max_tokens is larger than 2048. "
+            "For IT2I tests observed AR output is about 500-600 tokens; max_tokens=8192 inflates KV memory."
+        )
 
 
 def print_result_summary(summary: dict[str, Any]) -> None:
