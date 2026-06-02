@@ -125,6 +125,49 @@ def _is_comprehension_stage(stage_cfg: Any) -> bool:
     return bool(getattr(stage_cfg, "is_comprehension", False))
 
 
+_HUNYUAN_IMAGE3_ARCHS: Final = {
+    "HunyuanImage3ForConditionalGeneration",
+    "HunyuanImage3ForCausalMM",
+}
+
+
+def _normalize_model_identifier(value: Any) -> str:
+    return str(value or "").lower().replace("-", "").replace("_", "")
+
+
+def _looks_like_hunyuan_image3(value: Any) -> bool:
+    normalized = _normalize_model_identifier(value)
+    return "hunyuanimage3" in normalized or "hunyuanimage30" in normalized
+
+
+def _stage_get(stage_cfg: Any, key: str, default: Any = None) -> Any:
+    if isinstance(stage_cfg, dict):
+        return stage_cfg.get(key, default)
+    if hasattr(stage_cfg, "get"):
+        try:
+            return stage_cfg.get(key, default)
+        except Exception:
+            pass
+    return getattr(stage_cfg, key, default)
+
+
+def _stage_engine_arg(stage_cfg: Any, key: str, default: Any = None) -> Any:
+    value = _stage_get(stage_cfg, key, None)
+    if value is not None:
+        return value
+    engine_args = _stage_get(stage_cfg, "yaml_engine_args", None)
+    if engine_args is None:
+        engine_args = _stage_get(stage_cfg, "engine_args", None)
+    if isinstance(engine_args, dict):
+        return engine_args.get(key, default)
+    if hasattr(engine_args, "get"):
+        try:
+            return engine_args.get(key, default)
+        except Exception:
+            pass
+    return getattr(engine_args, key, default)
+
+
 class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
     """OpenAI-compatible chat serving for both LLM and Diffusion models.
 
@@ -2315,19 +2358,21 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         """Build the shared multistage generation prompt and stage params."""
         stage_configs = getattr(engine, "stage_configs", None) or []
         default_params_list = get_default_sampling_params_list(engine)
-        od_config = resolve_diffusion_od_config(self.engine_client, self._diffusion_engine)
+        od_config = resolve_diffusion_od_config(
+            getattr(self, "engine_client", None),
+            getattr(self, "_diffusion_engine", None),
+        )
         od_model_class_name = getattr(od_config, "model_class_name", None) or ""
-        diffusion_model_name = self._diffusion_model_name or ""
-        is_hunyuan_image3 = any(
-            (
-                getattr(stage, "model_arch", None)
-                or (getattr(stage, "yaml_engine_args", {}) or {}).get("model_arch")
-                or ""
-            )
-            in {"HunyuanImage3ForConditionalGeneration", "HunyuanImage3ForCausalMM"}
-            for stage in stage_configs
-        ) or od_model_class_name in {"HunyuanImage3ForConditionalGeneration", "HunyuanImage3ForCausalMM"} or (
-            "hunyuanimage3" in diffusion_model_name.lower().replace("-", "")
+        diffusion_model_name = getattr(self, "_diffusion_model_name", "") or ""
+        stage_model_archs = [_stage_engine_arg(stage, "model_arch", "") or "" for stage in stage_configs]
+        stage_model_types = [_stage_engine_arg(stage, "model_type", "") or "" for stage in stage_configs]
+        config_path = getattr(engine, "config_path", "") or ""
+        is_hunyuan_image3 = (
+            any(arch in _HUNYUAN_IMAGE3_ARCHS for arch in stage_model_archs)
+            or od_model_class_name in _HUNYUAN_IMAGE3_ARCHS
+            or any(_looks_like_hunyuan_image3(value) for value in stage_model_types)
+            or _looks_like_hunyuan_image3(diffusion_model_name)
+            or _looks_like_hunyuan_image3(config_path)
         )
 
         height = gen_params.height
@@ -2369,7 +2414,8 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         logger.info(
             "[HunyuanImage3 online debug] build inputs: bot_task=%r sys_type=%r "
             "custom_system_prompt=%s height=%r width=%r num_reference_images=%d tokenizer=%s "
-            "is_hunyuan_image3=%s od_model_class_name=%r diffusion_model_name=%r",
+            "is_hunyuan_image3=%s od_model_class_name=%r diffusion_model_name=%r "
+            "stage_model_archs=%r stage_model_types=%r config_path=%r",
             bot_task,
             use_system_prompt,
             custom_system_prompt is not None,
@@ -2380,6 +2426,9 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
             is_hunyuan_image3,
             od_model_class_name,
             diffusion_model_name,
+            stage_model_archs,
+            stage_model_types,
+            config_path,
         )
 
         if bot_task is not None or use_system_prompt is not None or custom_system_prompt is not None:

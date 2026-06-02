@@ -1526,12 +1526,18 @@ class HunyuanImage3ForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
         self.time_embed = TimestepEmbedder(hidden_size=config.hidden_size)
 
         # vision
-        multimodal_config = getattr(vllm_config.model_config, "multimodal_config", None)
-        mm_encoder_tp_mode = getattr(multimodal_config, "mm_encoder_tp_mode", None) if multimodal_config else None
+        model_config = vllm_config.model_config
+        multimodal_config = getattr(model_config, "multimodal_config", None)
+        mm_encoder_tp_mode = getattr(model_config, "mm_encoder_tp_mode", None)
+        if mm_encoder_tp_mode is None and multimodal_config:
+            mm_encoder_tp_mode = getattr(multimodal_config, "mm_encoder_tp_mode", None)
         use_vit_data_parallel = mm_encoder_tp_mode == "data"
         logger.info(
-            "HunyuanImage3 AR ViT DP config: mm_encoder_tp_mode=%s, use_data_parallel=%s",
+            "HunyuanImage3 AR ViT DP config: mm_encoder_tp_mode=%s, "
+            "model_config_mm_encoder_tp_mode=%s, multimodal_mm_encoder_tp_mode=%s, use_data_parallel=%s",
             mm_encoder_tp_mode,
+            getattr(model_config, "mm_encoder_tp_mode", None),
+            getattr(multimodal_config, "mm_encoder_tp_mode", None) if multimodal_config else None,
             use_vit_data_parallel,
         )
         self.vision_model = Siglip2VisionTransformer(

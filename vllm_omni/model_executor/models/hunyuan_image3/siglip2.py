@@ -141,6 +141,7 @@ class Siglip2Attention(nn.Module):
         config,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        use_data_parallel: bool | None = None,
     ):
         super().__init__()
         self.embed_dim = config.hidden_size
@@ -148,7 +149,8 @@ class Siglip2Attention(nn.Module):
         self.head_dim = self.embed_dim // self.num_heads
         self.scale = self.head_dim**-0.5
 
-        use_data_parallel = is_vit_use_data_parallel()
+        helper_use_data_parallel = is_vit_use_data_parallel()
+        use_data_parallel = helper_use_data_parallel if use_data_parallel is None else use_data_parallel
         self.qkv_proj = QKVParallelLinear(
             hidden_size=self.embed_dim,
             head_size=self.head_dim,
@@ -214,9 +216,11 @@ class Siglip2MLP(nn.Module):
         config,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        use_data_parallel: bool | None = None,
     ):
         super().__init__()
-        use_data_parallel = is_vit_use_data_parallel()
+        helper_use_data_parallel = is_vit_use_data_parallel()
+        use_data_parallel = helper_use_data_parallel if use_data_parallel is None else use_data_parallel
         self.activation_fn = get_act_fn(config.hidden_act)
         self.fc1 = ColumnParallelLinear(
             config.hidden_size,
@@ -246,6 +250,7 @@ class Siglip2EncoderLayer(nn.Module):
         config,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        use_data_parallel: bool | None = None,
     ):
         super().__init__()
         self.embed_dim = config.hidden_size
@@ -253,12 +258,14 @@ class Siglip2EncoderLayer(nn.Module):
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
+            use_data_parallel=use_data_parallel,
         )
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = Siglip2MLP(
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
+            use_data_parallel=use_data_parallel,
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
 
@@ -292,6 +299,7 @@ class Siglip2Encoder(nn.Module):
         config,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        use_data_parallel: bool | None = None,
     ):
         super().__init__()
         self.layers = nn.ModuleList(
@@ -300,6 +308,7 @@ class Siglip2Encoder(nn.Module):
                     config,
                     quant_config=quant_config,
                     prefix=f"{prefix}.layers.{idx}",
+                    use_data_parallel=use_data_parallel,
                 )
                 for idx in range(config.num_hidden_layers)
             ]
@@ -352,6 +361,7 @@ class Siglip2VisionTransformer(nn.Module):
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.encoder" if prefix else "encoder",
+            use_data_parallel=use_data_parallel,
         )
         self.post_layernorm = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self._logged_forward_input_stats = False

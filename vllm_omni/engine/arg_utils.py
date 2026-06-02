@@ -142,6 +142,7 @@ class OmniEngineArgs(EngineArgs):
     omni_kv_config: dict | None = None
     quantization_config: Any | None = None
     force_cutlass_fp8: bool | None = None
+    mm_encoder_tp_mode: str | None = None
     worker_type: str | None = None
     task_type: str | None = None
     worker_cls: str = None
@@ -349,6 +350,7 @@ class OmniEngineArgs(EngineArgs):
             omni_kv_config=self.omni_kv_config,
             task_type=self.task_type,
             has_sampling_extra_args=self.has_sampling_extra_args,
+            mm_encoder_tp_mode=getattr(self, "mm_encoder_tp_mode", None),
         )
         return omni_config
 
