@@ -2431,7 +2431,7 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
             config_path,
         )
 
-        if bot_task is not None or use_system_prompt is not None or custom_system_prompt is not None:
+        if is_hunyuan_image3 or bot_task is not None or use_system_prompt is not None or custom_system_prompt is not None:
             from vllm_omni.diffusion.models.hunyuan_image3.prompt_utils import (
                 build_prompt,
                 build_prompt_tokens,
