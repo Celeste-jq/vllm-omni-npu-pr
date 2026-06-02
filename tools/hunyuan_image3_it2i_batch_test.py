@@ -544,6 +544,11 @@ def summarize_results(
     ttfts = [metric.ttft_s for metric in successes if metric.ttft_s > 0.0]
     e2es = [metric.e2e_s for metric in successes if metric.e2e_s > 0.0]
     peaks = [metric.peak_memory_mb for metric in successes if metric.peak_memory_mb > 0.0]
+    tpot_proxy_s = [
+        max(metric.e2e_s - metric.ttft_s, 0.0) / max(output_tokens - 1, 1)
+        for metric in successes
+        if metric.e2e_s > 0.0
+    ]
     ar_stages = [
         find_stage_duration_seconds(
             metric.stage_durations,
@@ -597,7 +602,9 @@ def summarize_results(
         "first_event_p95_s": percentile(first_events, 0.95),
         "ttft_mean_s": mean(ttfts),
         "ttft_p50_s": percentile(ttfts, 0.50),
+        "ttft_p90_s": percentile(ttfts, 0.90),
         "ttft_p95_s": percentile(ttfts, 0.95),
+        "tpot_p50_s": percentile(tpot_proxy_s, 0.50),
         "e2e_mean_s": mean(e2es),
         "e2e_p50_s": percentile(e2es, 0.50),
         "e2e_p95_s": percentile(e2es, 0.95),
@@ -606,6 +613,8 @@ def summarize_results(
         "peak_memory_mb_max": max(peaks) if peaks else 0.0,
         "ar_delta_mean": mean([float(metric.ar_delta_count) for metric in successes]),
         "ar_text_chars_mean": mean([float(metric.ar_text_chars) for metric in successes]),
+        "request_throughput_qps": len(successes) / wall_time_s if wall_time_s > 0.0 else 0.0,
+        "total_token_throughput_tok_s": (len(successes) / wall_time_s * (input_tokens + output_tokens)) if wall_time_s > 0.0 else 0.0,
         "response_event_types": union_event_types(metrics),
         "stage_duration_keys": union_stage_duration_keys(metrics),
         "saved_image_paths": saved_image_paths,
@@ -669,6 +678,53 @@ def print_case_config(
             "[warning] AR max_tokens is larger than 2048. "
             "For IT2I tests observed AR output is about 500-600 tokens; max_tokens=8192 inflates KV memory."
         )
+
+
+def build_benchmark_configuration(summary: dict[str, Any], deploy_config: Path, batch_size: int) -> str:
+    return (
+        f"{deploy_config.name} | batch={batch_size} | "
+        f"ar_seqs={summary['ar_max_num_seqs']} dit_seqs={summary['dit_max_num_seqs']} | "
+        f"inflight={summary['edge_max_inflight']} | "
+        f"ar_mem={summary['ar_gpu_memory_utilization']} dit_mem={summary['dit_gpu_memory_utilization']} | "
+        f"ar_tokens={summary['ar_max_tokens']} | "
+        f"cudagraph={summary['cudagraph_mode']}"
+    )
+
+
+def build_benchmark_observation(summary: dict[str, Any]) -> str:
+    notes: list[str] = []
+    if summary["fail"] > 0:
+        notes.append(f"{summary['fail']} failed")
+    else:
+        notes.append("all requests succeeded")
+    if summary["vit_dp_request_global_batch_max"] and summary["vit_dp_request_global_batch_max"] < summary["batch_size"]:
+        notes.append("AR ViT DP global_batch < batch_size")
+    if summary["response_event_types"] == ["image"]:
+        notes.append("image-only response; TPOT is a proxy from tail latency")
+    if summary["saved_image_paths"]:
+        notes.append(f"saved {len(summary['saved_image_paths'])} images")
+    if summary["peak_memory_mb_max"] > 0.0:
+        notes.append(f"peak_mem={summary['peak_memory_mb_max']:.0f}MB")
+    return "; ".join(notes)
+
+
+def print_benchmark_results(summary: dict[str, Any], deploy_config: Path, batch_size: int) -> None:
+    configuration = build_benchmark_configuration(summary, deploy_config, batch_size)
+    observation = build_benchmark_observation(summary)
+    rows = [
+        ("Configuration", configuration),
+        ("Request Throughput", f"{summary['request_throughput_qps']:.4f} req/s"),
+        ("Mean TTFT", f"{summary['ttft_mean_s'] * 1000.0:.2f} ms"),
+        ("P50 TTFT", f"{summary['ttft_p50_s'] * 1000.0:.2f} ms"),
+        ("P90 TTFT", f"{summary['ttft_p90_s'] * 1000.0:.2f} ms"),
+        ("P50 TPOT", f"{summary['tpot_p50_s'] * 1000.0:.2f} ms"),
+        ("Total Token Throughput", f"{summary['total_token_throughput_tok_s']:.2f} tok/s"),
+        ("Observation", observation),
+    ]
+    widths = [max(len(title), len(value)) for title, value in rows]
+    print("\n========== Benchmark Results ==========")
+    for (title, value), width in zip(rows, widths, strict=True):
+        print(f"{title:<{width}}  {value}")
 
 
 def print_result_summary(summary: dict[str, Any]) -> None:
@@ -884,6 +940,7 @@ def main(argv: list[str] | None = None) -> int:
         vit_dp_summary=vit_dp_summary,
         saved_image_paths=summarize_image_paths(metrics),
     )
+    print_benchmark_results(result, run_deploy_config, batch_size)
     write_outputs(
         output_dir,
         config_info,
