@@ -326,12 +326,14 @@ class Siglip2VisionTransformer(nn.Module):
         config,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        use_data_parallel: bool | None = None,
     ):
         super().__init__()
         config = Config(config)
         self.config = config
         self.embed_dim = config.hidden_size
-        use_data_parallel = is_vit_use_data_parallel()
+        helper_use_data_parallel = is_vit_use_data_parallel()
+        use_data_parallel = helper_use_data_parallel if use_data_parallel is None else use_data_parallel
         self.use_data_parallel = use_data_parallel
         try:
             decoder_tp_size = get_tensor_model_parallel_world_size()

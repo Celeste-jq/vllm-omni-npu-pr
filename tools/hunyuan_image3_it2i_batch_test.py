@@ -183,6 +183,15 @@ def infer_batch_size(config: dict[str, Any]) -> int:
     raise ValueError("unable to infer batch_size from YAML max_num_seqs/max_inflight")
 
 
+def build_server_env() -> dict[str, str]:
+    env = os.environ.copy()
+    # torch_npu graph capture checks TASK_QUEUE_ENABLE, while some scripts and
+    # docs use TASKQUEUEENABLE. Set both so parent-shell values cannot leak in.
+    env["TASK_QUEUE_ENABLE"] = "1"
+    env["TASKQUEUEENABLE"] = "1"
+    return env
+
+
 class ManagedServer:
     def __init__(self, *, model: str, deploy_config: Path, host: str, port: int, log_file: Path) -> None:
         self.model = model
@@ -195,8 +204,7 @@ class ManagedServer:
 
     def start(self) -> None:
         self.log_file.parent.mkdir(parents=True, exist_ok=True)
-        env = os.environ.copy()
-        env["TASKQUEUEENABLE"] = "1"
+        env = build_server_env()
         cmd = [
             "vllm",
             "serve",
@@ -210,6 +218,12 @@ class ManagedServer:
             str(self.deploy_config),
         ]
         print("[server] " + " ".join(cmd), flush=True)
+        print(
+            "[server-env] "
+            f"TASK_QUEUE_ENABLE={env.get('TASK_QUEUE_ENABLE')} "
+            f"TASKQUEUEENABLE={env.get('TASKQUEUEENABLE')}",
+            flush=True,
+        )
         self.process = subprocess.Popen(  # noqa: S603
             cmd,
             stdout=subprocess.PIPE,
@@ -455,7 +469,8 @@ def print_case_config(
     print(f"max_num_batched_tokens(ar/dit)={summary['ar_max_num_batched_tokens']}/{summary['dit_max_num_batched_tokens']}")
     print(f"cudagraph_mode={summary['cudagraph_mode']}")
     print(f"cudagraph_capture_sizes={summary['cudagraph_capture_sizes']}")
-    print(f"TASKQUEUEENABLE=1")
+    print("TASK_QUEUE_ENABLE=1")
+    print("TASKQUEUEENABLE=1")
     print(f"rope_enabled={str(summary['rope_enabled']).lower()}")
     print(f"ar_vit_dp_enabled={str(summary['ar_vit_dp_enabled']).lower()}")
     print(f"mm_encoder_tp_mode={summary['mm_encoder_tp_mode']}")

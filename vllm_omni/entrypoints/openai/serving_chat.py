@@ -2315,6 +2315,15 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         """Build the shared multistage generation prompt and stage params."""
         stage_configs = getattr(engine, "stage_configs", None) or []
         default_params_list = get_default_sampling_params_list(engine)
+        is_hunyuan_image3 = any(
+            (
+                getattr(stage, "model_arch", None)
+                or (getattr(stage, "yaml_engine_args", {}) or {}).get("model_arch")
+                or ""
+            )
+            in {"HunyuanImage3ForConditionalGeneration", "HunyuanImage3ForCausalMM"}
+            for stage in stage_configs
+        )
 
         height = gen_params.height
         width = gen_params.width
@@ -2338,8 +2347,12 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         modalities = ["image"]
         if reference_images:
             if len(reference_images) == 1:
-                engine_prompt_data = {"img2img": reference_images[0]}
-                modalities = ["img2img"]
+                if is_hunyuan_image3:
+                    engine_prompt_data = {"image": reference_images[0]}
+                    modalities = ["image"]
+                else:
+                    engine_prompt_data = {"img2img": reference_images[0]}
+                    modalities = ["img2img"]
             else:
                 engine_prompt_data = {"image": reference_images}
 

@@ -13,6 +13,7 @@ from tools.hunyuan_image3_it2i_npu_experiment import (
 )
 from tools.hunyuan_image3_it2i_batch_test import (
     RequestMetric,
+    build_server_env,
     config_summary as batch_config_summary,
     summarize_results as summarize_batch_results,
 )
@@ -196,3 +197,13 @@ def test_summarize_batch_results_reports_batch_metrics_without_concurrency_label
     assert summary["peak_memory_mb_max"] == pytest.approx(1200.0)
     assert summary["blocks_per_request"] == 8
     assert summary["estimated_max_batch"] == 125
+
+
+def test_batch_server_env_forces_npu_graph_task_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TASK_QUEUE_ENABLE", "2")
+    monkeypatch.setenv("TASKQUEUEENABLE", "2")
+
+    env = build_server_env()
+
+    assert env["TASK_QUEUE_ENABLE"] == "1"
+    assert env["TASKQUEUEENABLE"] == "1"
