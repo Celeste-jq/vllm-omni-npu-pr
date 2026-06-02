@@ -1,3 +1,4 @@
+import os
 from importlib.util import find_spec
 
 import torch
@@ -7,6 +8,10 @@ from vllm.logger import init_logger
 from vllm_omni.diffusion.layers.custom_op import CustomOp
 
 logger = init_logger(__name__)
+
+
+def _env_truthy(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def rotate_half(x, interleaved=False):
@@ -94,6 +99,7 @@ class RotaryEmbedding(CustomOp):
         self.interleaved = not is_neox_style
         self.apply_rotary_emb_flash_attn = None
         self.has_mindie = False
+        self.force_native_rope = _env_truthy("VLLM_OMNI_FORCE_NATIVE_ROPE")
         # ``find_spec("flash_attn")`` is True as long as *any* package publishes
         # the ``flash_attn`` namespace — including ``flash-attn-4``, which ships
         # only ``flash_attn.cute`` and no ``flash_attn.ops``. Guard the import
@@ -160,6 +166,8 @@ class RotaryEmbedding(CustomOp):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
+        if self.force_native_rope:
+            return self.forward_native(x, cos, sin)
         if self.has_mindie:
             try:
                 x, squeezed = _ensure_batch_dim(x)
@@ -259,6 +267,8 @@ class RotaryEmbeddingWan(RotaryEmbedding):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
+        if self.force_native_rope:
+            return self.forward_native(x, cos, sin)
         if self.has_mindie:
             try:
                 if cos.dim() > 2:
