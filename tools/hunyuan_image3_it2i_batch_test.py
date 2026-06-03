@@ -462,13 +462,13 @@ async def send_one_request(
     session: Any,
     *,
     api_url: str,
-    model: str,
+    model: str | None,
     image_path: Path,
     prompt: str,
     size: str,
     output_format: str,
-    num_inference_steps: int,
-    guidance_scale: float,
+    num_inference_steps: int | None,
+    guidance_scale: float | None,
     seed: int,
     request_index: int,
     timeout_s: float,
@@ -477,13 +477,16 @@ async def send_one_request(
     import aiohttp
 
     form = aiohttp.FormData()
-    form.add_field("model", model)
+    if model is not None:
+        form.add_field("model", model)
     form.add_field("image", image_path.read_bytes(), filename=image_path.name, content_type="image/png")
     form.add_field("prompt", prompt)
     form.add_field("size", size)
     form.add_field("output_format", output_format)
-    form.add_field("num_inference_steps", str(num_inference_steps))
-    form.add_field("guidance_scale", str(guidance_scale))
+    if num_inference_steps is not None:
+        form.add_field("num_inference_steps", str(num_inference_steps))
+    if guidance_scale is not None:
+        form.add_field("guidance_scale", str(guidance_scale))
     form.add_field("seed", str(seed + request_index))
     form.add_field("stream", "true")
 
@@ -678,10 +681,10 @@ def summarize_results(
         if observed_input_tokens_for_capacity
         else "cli_estimate_for_max_concurrency"
     )
-    observed_output_tokens_for_capacity = max(observed_ar_output_tokens, default=0)
-    output_tokens_for_capacity = observed_output_tokens_for_capacity or output_tokens
+    observed_output_tokens_for_capacity = mean([float(value) for value in observed_ar_output_tokens])
+    output_tokens_for_capacity = observed_output_tokens_for_capacity or float(output_tokens)
     output_tokens_for_capacity_source = (
-        "server_log_ar2diffusion"
+        "server_log_ar2diffusion_mean"
         if observed_output_tokens_for_capacity
         else "cli_estimate_for_max_concurrency"
     )
@@ -707,6 +710,7 @@ def summarize_results(
         "observed_input_tokens_mean": mean([float(value) for value in observed_input_tokens]),
         "observed_input_tokens_max": max(observed_input_tokens, default=0),
         "observed_input_tokens_source": "server_log_token_profile" if observed_input_tokens else "missing",
+        "output_tokens_for_capacity_mean": observed_output_tokens_for_capacity,
         "output_tokens_for_capacity": output_tokens_for_capacity,
         "output_tokens_for_capacity_source": output_tokens_for_capacity_source,
         "observed_ar_output_tokens": observed_ar_output_tokens,
@@ -715,7 +719,7 @@ def summarize_results(
         "observed_ar_output_tokens_source": "server_log_ar2diffusion" if observed_ar_output_tokens else "missing",
         "tokens_per_request": tokens_per_request,
         "blocks_per_request": blocks_per_request,
-        "max_concurrency_formula": "num_blocks // ceil((input_tokens_for_capacity + output_tokens_for_capacity) / block_size)",
+        "max_concurrency_formula": "num_blocks // ceil((input_tokens_for_capacity + output_tokens_for_capacity_mean) / block_size)",
         "estimated_max_batch": estimated_max_batch,
         "max_concurrency": estimated_max_batch,
         "success": len(successes),
@@ -879,7 +883,7 @@ def print_result_summary(summary: dict[str, Any]) -> None:
         f"observed_input_tokens={summary['observed_input_tokens']}"
     )
     print(
-        f"output_tokens_for_capacity={summary['output_tokens_for_capacity']} "
+        f"output_tokens_for_capacity_mean={summary['output_tokens_for_capacity_mean']:.3f} "
         f"source={summary['output_tokens_for_capacity_source']} "
         f"observed_ar_output_tokens={summary['observed_ar_output_tokens']}"
     )
@@ -984,7 +988,7 @@ def write_outputs(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run one HunyuanImage3 IT2I NPU batch-size test.")
     parser.add_argument("--deploy-config", default=str(DEFAULT_DEPLOY_CONFIG))
-    parser.add_argument("--model", default="tencent/HunyuanImage-3.0-Instruct")
+    parser.add_argument("--model", default=None)
     parser.add_argument("--image-path", required=True)
     parser.add_argument("--prompt", default="Make the scene snowy while preserving the main subject.")
     parser.add_argument("--batch-size", type=int, default=None, help="Defaults to stage 0 max_num_seqs in YAML.")
@@ -992,8 +996,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8092)
     parser.add_argument("--size", default="1024x1024")
     parser.add_argument("--output-format", default="png")
-    parser.add_argument("--num-inference-steps", type=int, default=50)
-    parser.add_argument("--guidance-scale", type=float, default=5.0)
+    parser.add_argument("--num-inference-steps", type=int, default=None)
+    parser.add_argument("--guidance-scale", type=float, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--input-tokens", type=int, default=2048)
     parser.add_argument("--output-tokens", type=int, default=1024)

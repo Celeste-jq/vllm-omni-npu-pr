@@ -1543,6 +1543,16 @@ async def generate_images(request: ImageGenerationRequest, raw_request: Request)
             if request.system_prompt is not None:
                 extra_body["system_prompt"] = request.system_prompt
 
+            logger.info(
+                "[HunyuanImage3 request params] num_inference_steps=%s guidance_scale=%s "
+                "seed=%s size=%s n=%s",
+                request.num_inference_steps,
+                request.guidance_scale,
+                effective_seed,
+                request.size,
+                request.n,
+            )
+
             generation_result = await chat_handler.generate_diffusion_images(
                 prompt=request.prompt,
                 extra_body=extra_body,

@@ -2618,7 +2618,7 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
 
         logger.info(
             "[HunyuanImage3 online debug] stage params after overrides: stop_summary=%s "
-            "ar_extra_args=%r diffusion_sizes=%s",
+            "ar_extra_args=%r diffusion_sizes=%s diffusion_steps=%s",
             [
                 (
                     len(getattr(sp, "stop_token_ids", []) or []),
@@ -2636,6 +2636,11 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
             ),
             [
                 (getattr(sp, "height", None), getattr(sp, "width", None))
+                for sp in sampling_params_list
+                if isinstance(sp, OmniDiffusionSamplingParams)
+            ],
+            [
+                getattr(sp, "num_inference_steps", None)
                 for sp in sampling_params_list
                 if isinstance(sp, OmniDiffusionSamplingParams)
             ],
