@@ -325,8 +325,8 @@ def build_ar_profiler_config(args: argparse.Namespace, profiler_dir: Path) -> di
     return {
         "profiler": "torch",
         "torch_profiler_dir": str(profiler_dir),
-        "torch_profiler_record_shapes": bool(args.profiler_record_shapes),
-        "torch_profiler_with_stack": bool(args.profiler_with_stack),
+        "torch_profiler_record_shapes": True if args.profile_ar else bool(args.profiler_record_shapes),
+        "torch_profiler_with_stack": True if args.profile_ar else bool(args.profiler_with_stack),
         "torch_profiler_with_memory": bool(args.profiler_with_memory),
         "torch_profiler_with_flops": bool(args.profiler_with_flops),
         "torch_profiler_use_gzip": bool(args.profiler_use_gzip),
@@ -370,6 +370,20 @@ def build_server_env() -> dict[str, str]:
     env["TASK_QUEUE_ENABLE"] = "1"
     env["TASKQUEUEENABLE"] = "1"
     return env
+
+
+def post_profiler_control(*, host: str, port: int, action: str, stages: list[int]) -> None:
+    url = f"http://{host}:{port}/{action}"
+    payload = json.dumps({"stages": stages}).encode("utf-8")
+    request = urllib.request.Request(  # noqa: S310
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310
+        if response.status != 200:
+            raise RuntimeError(f"{action} failed with HTTP {response.status}")
 
 
 class ManagedServer:
@@ -988,7 +1002,7 @@ def write_outputs(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run one HunyuanImage3 IT2I NPU batch-size test.")
     parser.add_argument("--deploy-config", default=str(DEFAULT_DEPLOY_CONFIG))
-    parser.add_argument("--model", default=None)
+    parser.add_argument("--model", default="/data/weight/HunyuanImage-3.0-Instruct-Distil")
     parser.add_argument("--image-path", required=True)
     parser.add_argument("--prompt", default="Make the scene snowy while preserving the main subject.")
     parser.add_argument("--batch-size", type=int, default=None, help="Defaults to stage 0 max_num_seqs in YAML.")
@@ -1070,6 +1084,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     request_log_start = 0
     vit_dp_summary: dict[str, Any] = parse_vit_dp_batch_logs("")
+    profiler_started = False
     try:
         server.start()
         server.wait_ready(args.server_timeout_s)
@@ -1085,11 +1100,21 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 warmup_success = sum(1 for metric in warmup_metrics if metric.success)
                 print(f"[warmup] completed success={warmup_success}/{len(warmup_metrics)}")
+        if args.profile_ar:
+            print("[profiler] start stages=[0]")
+            post_profiler_control(host=args.host, port=args.port, action="start_profile", stages=[0])
+            profiler_started = True
         log_text = server.read_log()
         request_log_start = len(log_text)
         image_dir.mkdir(parents=True, exist_ok=True)
         wall_time_s, metrics = asyncio.run(run_batch_requests(args, batch_size, image_dir=image_dir))
     finally:
+        if profiler_started:
+            try:
+                print("[profiler] stop stages=[0]")
+                post_profiler_control(host=args.host, port=args.port, action="stop_profile", stages=[0])
+            except Exception as exc:  # noqa: BLE001
+                print(f"[warning] failed to stop AR profiler: {exc}", flush=True)
         server.stop()
     log_text = server.read_log()
     kv_cache_profile = merge_kv_cache_profile(kv_cache_profile, parse_kv_cache_profile(log_text))
