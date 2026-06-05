@@ -62,13 +62,28 @@ def _empty_accelerator_cache() -> None:
 
 AR_DEVICES, DIT_DEVICES = _default_ar_dit_devices()
 MODEL_NAME = "tencent/HunyuanImage-3.0-Instruct"
+NPU_MODEL_NAME = "tencent/HunyuanImage-3.0-Instruct-Distil"
 NUM_INFERENCE_STEPS = 50
 GUIDANCE_SCALE = 2.5
+NPU_GUIDANCE_SCALE = 1.0
+NPU_AR_TEMPERATURE = 0.6
+NPU_AR_TOP_P = 0.95
+NPU_AR_TOP_K = 1024
+NPU_AR_MAX_TOKENS = 2048
+NPU_AR_REPETITION_PENALTY = 1.0
+NPU_AR_SAMPLING_PARAMS = {
+    "temperature": NPU_AR_TEMPERATURE,
+    "top_p": NPU_AR_TOP_P,
+    "top_k": NPU_AR_TOP_K,
+    "max_tokens": NPU_AR_MAX_TOKENS,
+    "repetition_penalty": NPU_AR_REPETITION_PENALTY,
+}
 
 # ============================================================================
 # Constants
 # ============================================================================
 MODEL_PATH = os.environ.get("HUNYUAN_MODEL_PATH", MODEL_NAME)
+NPU_MODEL_PATH = os.environ.get("HUNYUAN_NPU_MODEL_PATH", os.environ.get("HUNYUAN_MODEL_PATH", NPU_MODEL_NAME))
 # Test input
 PROMPT = "基于图一的logo，参考图二中冰箱贴的材质，制作一个新的冰箱贴"
 TEST_IMAGE_URLS = [
@@ -196,10 +211,11 @@ _NPU_DEPLOY_CONFIG = {
             "omni_kv_config": {"need_send_cache": True},
             "output_connectors": {"to_stage_1": "shared_memory_connector"},
             "default_sampling_params": {
-                "temperature": 0.0,
-                "top_p": 1,
-                "top_k": -1,
-                "max_tokens": 8192,
+                "temperature": NPU_AR_TEMPERATURE,
+                "top_p": NPU_AR_TOP_P,
+                "top_k": NPU_AR_TOP_K,
+                "max_tokens": NPU_AR_MAX_TOKENS,
+                "repetition_penalty": NPU_AR_REPETITION_PENALTY,
                 "stop_token_ids": [128025],
                 "detokenize": True,
                 "skip_special_tokens": False,
@@ -224,7 +240,7 @@ _NPU_DEPLOY_CONFIG = {
             "input_connectors": {"from_stage_0": "shared_memory_connector"},
             "default_sampling_params": {
                 "num_inference_steps": NPU_NUM_INFERENCE_STEPS,
-                "guidance_scale": GUIDANCE_SCALE,
+                "guidance_scale": NPU_GUIDANCE_SCALE,
             },
         },
     ],
@@ -396,6 +412,9 @@ def _run_offline(
     output_path: Path,
     *,
     num_inference_steps: int = NUM_INFERENCE_STEPS,
+    guidance_scale: float = GUIDANCE_SCALE,
+    model_path: str = MODEL_PATH,
+    ar_sampling_params: dict[str, float | int] | None = None,
 ) -> tuple[Image.Image, str, float]:
     from transformers import AutoTokenizer
 
@@ -404,7 +423,7 @@ def _run_offline(
 
     build_kwargs: dict = {"task": "it2i", "bot_task": "think_recaption", "sys_type": "en_unified", "num_images": 2}
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     result = build_prompt_tokens(
         PROMPT,
         tokenizer,
@@ -414,16 +433,20 @@ def _run_offline(
     system_prompt_type = result.system_prompt_type
 
     ar_stop_token_ids = resolve_stop_token_ids(task="it2i", bot_task="think_recaption", tokenizer=tokenizer)
-    with OmniRunner(MODEL_PATH, deploy_config=deploy_config_path) as runner:
+    with OmniRunner(model_path, deploy_config=deploy_config_path) as runner:
         params_list = list(runner.omni.default_sampling_params_list)
         for sp in params_list:
             if isinstance(sp, OmniDiffusionSamplingParams):
                 sp.num_inference_steps = num_inference_steps
-                sp.guidance_scale = GUIDANCE_SCALE
+                sp.guidance_scale = guidance_scale
                 sp.seed = SEED
                 sp.generator = torch.Generator(device=current_omni_platform.device_type or "cuda").manual_seed(SEED)
             elif hasattr(sp, "stop_token_ids"):
                 sp.stop_token_ids = ar_stop_token_ids
+                if ar_sampling_params is not None:
+                    for key, value in ar_sampling_params.items():
+                        if hasattr(sp, key):
+                            setattr(sp, key, value)
 
         images = download_images(TEST_IMAGE_URLS)
         prompts: list[OmniPromptType] = [
@@ -476,6 +499,9 @@ def _run_online(
     output_path: Path,
     *,
     num_inference_steps: int = NUM_INFERENCE_STEPS,
+    guidance_scale: float = GUIDANCE_SCALE,
+    model_path: str = MODEL_PATH,
+    ar_sampling_params: dict[str, float | int] | None = None,
 ) -> tuple[Image.Image, str, float]:
     from benchmarks.accuracy.common import decode_base64_image, pil_to_png_bytes
 
@@ -488,23 +514,26 @@ def _run_online(
         "900",
     ]
     try:
-        with OmniServer(MODEL_PATH, server_args, use_omni=True) as omni_server:
+        with OmniServer(model_path, server_args, use_omni=True) as omni_server:
             images = download_images(TEST_IMAGE_URLS)
             t0 = time.perf_counter()
+            request_data = {
+                "model": omni_server.model,
+                "prompt": PROMPT,
+                "n": 1,
+                "response_format": "b64_json",
+                "num_inference_steps": num_inference_steps,
+                "guidance_scale": guidance_scale,
+                "seed": SEED,
+                "sys_type": "en_unified",
+                "bot_task": "think_recaption",
+                "size": "1280x720",
+            }
+            if ar_sampling_params is not None:
+                request_data.update(ar_sampling_params)
             response = requests.post(
                 f"http://{omni_server.host}:{omni_server.port}/v1/images/edits",
-                data={
-                    "model": omni_server.model,
-                    "prompt": PROMPT,
-                    "n": 1,
-                    "response_format": "b64_json",
-                    "num_inference_steps": num_inference_steps,
-                    "guidance_scale": GUIDANCE_SCALE,
-                    "seed": SEED,
-                    "sys_type": "en_unified",
-                    "bot_task": "think_recaption",
-                    "size": "1280x720",
-                },
+                data=request_data,
                 files=[
                     ("image", (f"image_{i}.png", pil_to_png_bytes(img), "image/png")) for i, img in enumerate(images)
                 ],
@@ -597,7 +626,7 @@ def test_image_to_image_alignment_npu(
         raise ImportError("Missing dependency: FlagEmbedding\nInstall with: pip install FlagEmbedding")
     from tabulate import tabulate
 
-    output_dir = model_output_dir(accuracy_artifact_root, MODEL_NAME + f"-npu-{case_name}")
+    output_dir = model_output_dir(accuracy_artifact_root, NPU_MODEL_NAME + f"-npu-{case_name}")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
@@ -606,13 +635,16 @@ def test_image_to_image_alignment_npu(
             str(tmp / "npu.yaml"),
             output_dir,
             num_inference_steps=NPU_NUM_INFERENCE_STEPS,
+            guidance_scale=NPU_GUIDANCE_SCALE,
+            model_path=NPU_MODEL_PATH,
+            ar_sampling_params=NPU_AR_SAMPLING_PARAMS,
         )
 
     npu_cot = npu_cot.lstrip("\n")
     scorer = SemanticSimilarityScorer()
     clip_scorer = CLIPScorer()
     cot_results = scorer.text_similarity(npu_cot, COT_REF)
-    image_ref = Image.open(str(accuracy_assets_root / "hunyuan_image_ref.png")).convert("RGB")
+    image_ref = Image.open(str(accuracy_assets_root / "hunyuan_image_distil_ref.png")).convert("RGB")
     image_clip_score = clip_scorer.image_image_score(npu_image, image_ref)
     ssim_value, psnr_value = compute_image_ssim_psnr(prediction=npu_image, reference=image_ref, compare_mode="RGB")
 
@@ -768,6 +800,22 @@ def test_npu_it2i_config_uses_eight_steps(tmp_path: Path) -> None:
     config = yaml.safe_load(config_path.read_text())
 
     assert config["stages"][1]["default_sampling_params"]["num_inference_steps"] == NPU_NUM_INFERENCE_STEPS
+
+
+def test_npu_it2i_config_matches_official_distil_params(tmp_path: Path) -> None:
+    config_path = tmp_path / "npu.yaml"
+    _make_npu_config(config_path)
+    config = yaml.safe_load(config_path.read_text())
+    ar_params = config["stages"][0]["default_sampling_params"]
+    dit_params = config["stages"][1]["default_sampling_params"]
+
+    assert ar_params["temperature"] == NPU_AR_TEMPERATURE
+    assert ar_params["top_p"] == NPU_AR_TOP_P
+    assert ar_params["top_k"] == NPU_AR_TOP_K
+    assert ar_params["max_tokens"] == NPU_AR_MAX_TOKENS
+    assert ar_params["repetition_penalty"] == NPU_AR_REPETITION_PENALTY
+    assert dit_params["num_inference_steps"] == NPU_NUM_INFERENCE_STEPS
+    assert dit_params["guidance_scale"] == NPU_GUIDANCE_SCALE
 
 
 @hardware_test(res={"cuda": "H100"}, num_cards=8)
