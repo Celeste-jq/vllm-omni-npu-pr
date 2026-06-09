@@ -171,19 +171,17 @@ def build_request_mm_uuids(req_idx: int, num_images: int, batch_id: str | None =
     return {"image": [f"{prefix}req-{req_idx}-image-{image_idx}" for image_idx in range(num_images)]}
 
 
-def _create_patched_deploy_config(deploy_config_path: str) -> str:
+def _create_patched_deploy_config(deploy_config_path: str, stage0_max_num_seqs: int) -> str:
     """Create a temp deploy config with AR VAE DP enabled on every stage 0."""
 
     with open(deploy_config_path, encoding="utf-8") as f:
         raw_text = f.read()
 
-    if "ar_vae_tp_mode: data" in raw_text:
-        return deploy_config_path
-
     lines = raw_text.splitlines()
     patched_lines: list[str] = []
     in_stage0 = False
     stage0_indent: int | None = None
+    injected_vae_dp = "ar_vae_tp_mode: data" in raw_text
 
     for line in lines:
         stripped = line.strip()
@@ -199,14 +197,20 @@ def _create_patched_deploy_config(deploy_config_path: str) -> str:
             in_stage0 = False
             stage0_indent = None
 
-        if in_stage0 and stripped == "hf_overrides:":
+        if in_stage0 and stripped.startswith("max_num_seqs:"):
+            current = int(stripped.split(":", 1)[1].strip())
+            patched_lines.append(" " * indent + f"max_num_seqs: {max(current, stage0_max_num_seqs)}")
+            continue
+
+        if in_stage0 and not injected_vae_dp and stripped == "hf_overrides:":
             patched_lines.append(line)
             patched_lines.append(" " * (indent + 2) + "ar_vae_tp_mode: data")
+            injected_vae_dp = True
             continue
 
         patched_lines.append(line)
 
-    if not any("ar_vae_tp_mode: data" in line for line in patched_lines):
+    if not injected_vae_dp:
         raise ValueError(f"Failed to inject ar_vae_tp_mode into {deploy_config_path}")
 
     temp_dir = tempfile.mkdtemp(prefix="hunyuan_image3_vae_dp_")
@@ -484,13 +488,12 @@ def main():
     if args.profile_runs <= 0:
         raise ValueError(f"--profile-runs must be positive, got {args.profile_runs}")
 
-    deploy_config = _create_patched_deploy_config(args.deploy_config)
-
     if args.image_paths and args.image_path:
         raise ValueError("--image-path and --image-paths are mutually exclusive.")
 
     prompts = load_prompts(args)
     plan = build_request_plan(args)
+    deploy_config = _create_patched_deploy_config(args.deploy_config, len(plan))
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     formatted_prompts: list[OmniPromptType] = []
     for req_idx, (prompt, image_paths) in enumerate(plan):

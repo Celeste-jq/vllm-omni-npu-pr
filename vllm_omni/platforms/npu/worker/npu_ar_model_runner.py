@@ -101,6 +101,10 @@ class NPUARModelRunner(OmniNPUModelRunner):
             device=device,
         )
 
+    def _maybe_run_batch_preprocess(self, req_ids: list[str], device: torch.device) -> None:
+        self._maybe_run_mm_batch_preprocess(req_ids, device)
+        super()._maybe_run_batch_preprocess(req_ids, device)
+
     def _make_buffer(self, *size, dtype, numpy=True):
         # Prevent ray from pinning the buffer due to large size
         from vllm_omni.distributed.ray_utils.utils import (

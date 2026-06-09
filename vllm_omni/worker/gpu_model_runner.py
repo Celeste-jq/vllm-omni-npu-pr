@@ -1455,6 +1455,9 @@ class OmniGPUModelRunner(GPUModelRunner):
                 scheduler_output,
                 encoder_cache=self.encoder_cache,
             ) as ec_connector_output:
+                preprocess_mm_batch = getattr(self, "_maybe_run_mm_batch_preprocess", None)
+                if callable(preprocess_mm_batch):
+                    preprocess_mm_batch(self.input_batch.req_ids, self.device)
                 self._execute_mm_encoder(scheduler_output)
                 mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output)
 
