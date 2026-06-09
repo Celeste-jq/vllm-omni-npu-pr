@@ -81,9 +81,6 @@ def parse_args():
     parser.add_argument("--warmup-runs", type=int, default=0, help="Number of warmup batch-admission runs.")
     parser.add_argument("--profile-runs", type=int, default=1, help="Number of measured batch-admission runs.")
 
-    from vllm_omni.engine.arg_utils import nullify_stage_engine_defaults
-
-    nullify_stage_engine_defaults(parser)
     return parser.parse_args()
 
 
