@@ -235,6 +235,7 @@ def run_batch_admission(
 
         active_reqs = set(request_ids)
         outputs_by_req: dict[str, Any] = {}
+        e2e_ms_by_req: dict[str, float] = {}
         while active_reqs:
             msg = omni.engine.try_get_output()
             should_continue, req_id, stage_id, req_state = omni._handle_output_message(msg)
@@ -257,13 +258,31 @@ def run_batch_admission(
                 final_stage_id_for_e2e=req_final_stage_ids[req_id],
             )
             if output is not None and stage_id == req_final_stage_ids[req_id]:
+                e2e_ms = 0.0
+                metrics_obj = getattr(req_state, "metrics", None)
+                e2e_events = getattr(metrics_obj, "e2e_events", None)
+                if e2e_events:
+                    last_evt = e2e_events[-1]
+                    e2e_ms = float(getattr(last_evt, "e2e_total_ms", 0.0) or 0.0)
+                if e2e_ms <= 0.0:
+                    e2e_ms = max(0.0, (time.time() - req_start_ts.get(req_id, wall_start_ts)) * 1000.0)
+                e2e_ms_by_req[req_id] = e2e_ms
+                setattr(output, "e2e_total_ms", e2e_ms)
                 outputs_by_req[req_id] = output
 
             if isinstance(msg, OutputMessage) and msg.finished:
                 active_reqs.discard(req_id)
                 omni._log_summary_and_cleanup(req_id)
 
-        return [outputs_by_req[req_id] for req_id in request_ids if req_id in outputs_by_req]
+        outputs: list[Any] = []
+        for req_id in request_ids:
+            output = outputs_by_req.get(req_id)
+            if output is None:
+                continue
+            if req_id in e2e_ms_by_req:
+                setattr(output, "e2e_total_ms", e2e_ms_by_req[req_id])
+            outputs.append(output)
+        return outputs
     except Exception:
         if request_ids:
             omni.abort(request_ids)
@@ -352,6 +371,7 @@ def _benchmark_metrics(outputs: list[Any], *, elapsed_s: float, configuration: s
     tpot_ms: list[float] = []
     ar_stage_ms: list[float] = []
     dit_stage_ms: list[float] = []
+    e2e_ms: list[float] = []
     total_input_tokens = 0
     total_output_tokens = 0
     non_empty_text_outputs = 0
@@ -395,6 +415,10 @@ def _benchmark_metrics(outputs: list[Any], *, elapsed_s: float, configuration: s
         if dit_ms is not None and dit_ms > 0.0:
             dit_stage_ms.append(dit_ms)
 
+        e2e_value = _safe_float(getattr(req_output, "e2e_total_ms", None))
+        if e2e_value is not None and e2e_value > 0.0:
+            e2e_ms.append(e2e_value)
+
     total_tokens = total_input_tokens + total_output_tokens
     return {
         "configuration": configuration,
@@ -408,6 +432,7 @@ def _benchmark_metrics(outputs: list[Any], *, elapsed_s: float, configuration: s
         "total_output_tokens": total_output_tokens,
         "mean_ar_stage_ms": (sum(ar_stage_ms) / len(ar_stage_ms)) if ar_stage_ms else 0.0,
         "mean_dit_stage_ms": (sum(dit_stage_ms) / len(dit_stage_ms)) if dit_stage_ms else 0.0,
+        "mean_e2e_ms": (sum(e2e_ms) / len(e2e_ms)) if e2e_ms else 0.0,
         "num_requests": len(outputs),
         "non_empty_text_outputs": non_empty_text_outputs,
         "empty_text_outputs": len(outputs) - non_empty_text_outputs,
@@ -425,6 +450,7 @@ def _print_benchmark_metrics(metrics: dict[str, Any]) -> None:
     print(f"  P50 TPOT                : {metrics.get('p50_tpot_ms', 0.0):.3f} ms")
     print(f"  Mean AR Stage Time      : {metrics.get('mean_ar_stage_ms', 0.0):.3f} ms")
     print(f"  Mean DiT Stage Time     : {metrics.get('mean_dit_stage_ms', 0.0):.3f} ms")
+    print(f"  Mean E2E Time           : {metrics.get('mean_e2e_ms', 0.0):.3f} ms")
     print(f"  Total Token Throughput   : {metrics.get('total_token_throughput', 0.0):.3f} tok/s")
     print(
         "  Text Outputs            : "
