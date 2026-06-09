@@ -11,10 +11,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import tempfile
 import time
 import uuid
-from pathlib import Path
 from typing import Any
 
 from PIL import Image
@@ -29,8 +27,7 @@ from vllm_omni.diffusion.models.hunyuan_image3.prompt_utils import (
 from vllm_omni.entrypoints.omni import Omni
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniPromptType
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_DEFAULT_DEPLOY_CONFIG = str(_REPO_ROOT / "vllm_omni" / "deploy" / "hunyuan_image_3_moe.yaml")
+_DEFAULT_DEPLOY_CONFIG = "vllm_omni/deploy/hunyuan_image_3_moe.yaml"
 
 
 def parse_args():
@@ -169,55 +166,6 @@ def count_prompt_images(prompt: dict[str, Any]) -> int:
 def build_request_mm_uuids(req_idx: int, num_images: int, batch_id: str | None = None) -> dict[str, list[str]]:
     prefix = f"{batch_id}-" if batch_id else ""
     return {"image": [f"{prefix}req-{req_idx}-image-{image_idx}" for image_idx in range(num_images)]}
-
-
-def _create_patched_deploy_config(deploy_config_path: str, stage0_max_num_seqs: int) -> str:
-    """Create a temp deploy config with AR VAE DP enabled on every stage 0."""
-
-    with open(deploy_config_path, encoding="utf-8") as f:
-        raw_text = f.read()
-
-    lines = raw_text.splitlines()
-    patched_lines: list[str] = []
-    in_stage0 = False
-    stage0_indent: int | None = None
-    injected_vae_dp = "ar_vae_tp_mode: data" in raw_text
-
-    for line in lines:
-        stripped = line.strip()
-        indent = len(line) - len(line.lstrip(" "))
-
-        if stripped.startswith("- stage_id: 0"):
-            in_stage0 = True
-            stage0_indent = indent
-            patched_lines.append(line)
-            continue
-
-        if in_stage0 and stage0_indent is not None and indent <= stage0_indent and stripped.startswith("- stage_id:"):
-            in_stage0 = False
-            stage0_indent = None
-
-        if in_stage0 and stripped.startswith("max_num_seqs:"):
-            current = int(stripped.split(":", 1)[1].strip())
-            patched_lines.append(" " * indent + f"max_num_seqs: {max(current, stage0_max_num_seqs)}")
-            continue
-
-        if in_stage0 and not injected_vae_dp and stripped == "hf_overrides:":
-            patched_lines.append(line)
-            patched_lines.append(" " * (indent + 2) + "ar_vae_tp_mode: data")
-            injected_vae_dp = True
-            continue
-
-        patched_lines.append(line)
-
-    if not injected_vae_dp:
-        raise ValueError(f"Failed to inject ar_vae_tp_mode into {deploy_config_path}")
-
-    temp_dir = tempfile.mkdtemp(prefix="hunyuan_image3_vae_dp_")
-    patched_path = os.path.join(temp_dir, Path(deploy_config_path).name)
-    with open(patched_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(patched_lines) + "\n")
-    return patched_path
 
 
 def run_batch_admission(
@@ -524,7 +472,7 @@ def main():
 
     prompts = load_prompts(args)
     plan = build_request_plan(args)
-    deploy_config = _create_patched_deploy_config(args.deploy_config, len(plan))
+    deploy_config = args.deploy_config
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     formatted_prompts: list[OmniPromptType] = []
     for req_idx, (prompt, image_paths) in enumerate(plan):
