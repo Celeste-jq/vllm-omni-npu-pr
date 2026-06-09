@@ -1921,8 +1921,10 @@ class HunyuanImage3ForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
         def _make_generator(img_idx: int, device: torch.device) -> torch.Generator | None:
             if vae_generator_seed is None or vae_generator_seed.numel() == 0:
                 return None
+            seed_values = vae_generator_seed.reshape(-1)
+            seed_idx = img_idx if img_idx < seed_values.numel() else 0
             return torch.Generator(device=device).manual_seed(
-                int(vae_generator_seed.reshape(-1)[img_idx].item())
+                int(seed_values[seed_idx].item())
             )
 
         batch_size = len(vae_pixel_values)

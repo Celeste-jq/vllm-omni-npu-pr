@@ -248,6 +248,7 @@ def run_batch_admission(
             prompt["multi_modal_uuids"] = build_request_mm_uuids(req_idx, count_prompt_images(prompt), batch_id)
             prompt_modalities = prompt.get("modalities", None)
             final_stage_id = omni._compute_final_stage_id(prompt_modalities)
+            final_output_stage_ids = omni._compute_final_output_stage_ids(prompt_modalities) or [final_stage_id]
             req_final_stage_ids[req_id] = final_stage_id
 
             metrics = OrchestratorMetrics(
@@ -271,6 +272,7 @@ def run_batch_admission(
                 prompt=prompt,
                 sampling_params_list=req_sp_list,
                 final_stage_id=final_stage_id,
+                final_output_stage_ids=final_output_stage_ids,
             )
             pending_msgs.append((req_id, msg))
 
