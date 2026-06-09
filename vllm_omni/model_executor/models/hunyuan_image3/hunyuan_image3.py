@@ -1986,7 +1986,10 @@ class HunyuanImage3ForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
 
         patch_param = next(self.patch_embed.parameters())
         local_token_list: list[torch.Tensor] = []
-        for img_idx in range(local_start, local_end):
+        for local_offset in range(local_batch_size):
+            global_idx = local_start + local_offset
+            # Keep padded ranks on the same VAE/patch path before HCCL gather.
+            img_idx = global_idx if global_idx < batch_size else 0
             vae_image_i = vae_pixel_values[img_idx]
             generator = _make_generator(img_idx, vae_image_i.device)
             t_i, latents_i = self._vae_encode(vae_image_i.unsqueeze(0), cfg_factor, generator=generator)
@@ -1999,16 +2002,7 @@ class HunyuanImage3ForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
                 vae_tokens = torch.cat((vae_tokens, pad), dim=0)
             local_token_list.append(vae_tokens[:max_token_count])
 
-        if local_count == 0:
-            local_tokens = patch_param.new_zeros((0, max_token_count, self.config.hidden_size))
-        else:
-            local_tokens = torch.stack(local_token_list, dim=0).to(dtype=patch_param.dtype)
-
-        if local_tokens.shape[0] < local_batch_size:
-            pad = patch_param.new_zeros(
-                (local_batch_size - local_tokens.shape[0], max_token_count, self.config.hidden_size)
-            )
-            local_tokens = torch.cat((local_tokens, pad), dim=0)
+        local_tokens = torch.stack(local_token_list, dim=0).to(dtype=patch_param.dtype)
 
         gathered_tokens = tensor_model_parallel_all_gather(local_tokens, dim=0)[:batch_size]
         return [
