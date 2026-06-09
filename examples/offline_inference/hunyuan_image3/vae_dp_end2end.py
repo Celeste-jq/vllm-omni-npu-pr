@@ -286,7 +286,7 @@ def run_batch_admission(
             print(f"{log_prefix} enqueued {req_id}")
 
         active_reqs = set(request_ids)
-        outputs: list[Any] = []
+        outputs_by_req: dict[str, Any] = {}
         while active_reqs:
             msg = omni.engine.try_get_output()
             should_continue, req_id, stage_id, req_state = omni._handle_output_message(msg)
@@ -308,14 +308,14 @@ def run_batch_admission(
                 wall_start_ts=wall_start_ts,
                 final_stage_id_for_e2e=req_final_stage_ids[req_id],
             )
-            if output is not None:
-                outputs.append(output)
+            if output is not None and stage_id == req_final_stage_ids[req_id]:
+                outputs_by_req[req_id] = output
 
             if isinstance(msg, OutputMessage) and msg.finished:
                 active_reqs.discard(req_id)
                 omni._log_summary_and_cleanup(req_id)
 
-        return outputs
+        return [outputs_by_req[req_id] for req_id in request_ids if req_id in outputs_by_req]
     except Exception:
         if request_ids:
             omni.abort(request_ids)
