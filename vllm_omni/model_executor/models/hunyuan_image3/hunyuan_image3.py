@@ -70,10 +70,8 @@ from vllm.model_executor.models.utils import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import rgba_to_rgb
 from vllm.multimodal.inputs import (
-    MultiModalBatchedField,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
-    MultiModalFieldElem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
@@ -1534,8 +1532,6 @@ class HunyuanImage3ForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
         self.time_embed = TimestepEmbedder(hidden_size=config.hidden_size)
         self.use_vae_data_parallel = getattr(config, "ar_vae_tp_mode", None) == "data"
         self._logged_vae_encode_state = False
-        self._ar_vae_dp_cache: dict[int, torch.Tensor] = {}
-        self._ar_vae_dp_next_cache_id = 0
 
         # vision
         multimodal_config = vllm_config.model_config.multimodal_config
@@ -2018,85 +2014,6 @@ class HunyuanImage3ForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
             for img_idx in range(batch_size)
         ]
 
-    @staticmethod
-    def _as_int_cache_id(cache_id: object) -> int | None:
-        if cache_id is None:
-            return None
-        if isinstance(cache_id, torch.Tensor):
-            if cache_id.numel() == 0:
-                return None
-            return int(cache_id.reshape(-1)[0].item())
-        if isinstance(cache_id, (list, tuple)):
-            if not cache_id:
-                return None
-            return HunyuanImage3ForConditionalGeneration._as_int_cache_id(cache_id[0])
-        try:
-            return int(cache_id)
-        except (TypeError, ValueError):
-            return None
-
-    @torch.inference_mode()
-    def preprocess_mm_batch(
-        self,
-        *,
-        req_ids: list[str],
-        model_intermediate_buffer: dict[str, dict[str, Any]],
-        device: torch.device,
-    ) -> None:
-        """Precompute AR VAE tokens across the current scheduler image items."""
-        if not self.use_vae_data_parallel:
-            return
-
-        work_items: list[tuple[Any, torch.Tensor, torch.Tensor]] = []
-        for req_id in req_ids:
-            req_info = model_intermediate_buffer.get(req_id)
-            if not isinstance(req_info, dict):
-                continue
-            mm_features = req_info.get("mm_features")
-            if not mm_features:
-                continue
-            for mm_feature in mm_features:
-                if getattr(mm_feature, "modality", None) != "image":
-                    continue
-                mm_item = getattr(mm_feature, "data", None)
-                if mm_item is None:
-                    continue
-                mm_input = mm_item.get_data()
-                if self._as_int_cache_id(mm_input.get("ar_vae_dp_cache_id")) is not None:
-                    continue
-                image_input = self._parse_and_validate_image_input(**dict(mm_input))
-                if image_input is None:
-                    continue
-                pixel_values = image_input["pixel_values"]
-                vae_images = pixel_values["vae_pixel_values"]
-                vae_grid = pixel_values["vae_token_grid_hw"]
-                # vLLM normally splits each <img> into a single item. If that
-                # changes, keep the existing per-call path for grouped items.
-                if len(vae_images) != 1:
-                    continue
-                work_items.append((mm_item, vae_images[0].to(device=device), vae_grid[:1].to(device=device)))
-
-        if len(work_items) <= 1:
-            return
-
-        vae_pixel_values = [item[1] for item in work_items]
-        vae_token_grid_hw = torch.cat([item[2] for item in work_items], dim=0)
-        logger.info(
-            "HunyuanImage3 AR VAE DP preprocess: global_items=%s, req_count=%s",
-            len(work_items),
-            len(req_ids),
-        )
-        vae_token_embeddings = self._vae_token_encode(vae_pixel_values, vae_token_grid_hw)
-
-        for mm_item, vae_tokens in zip((item[0] for item in work_items), vae_token_embeddings, strict=True):
-            cache_id = self._ar_vae_dp_next_cache_id
-            self._ar_vae_dp_next_cache_id += 1
-            self._ar_vae_dp_cache[cache_id] = vae_tokens
-            mm_item["ar_vae_dp_cache_id"] = MultiModalFieldElem(
-                data=cache_id,
-                field=MultiModalBatchedField(),
-            )
-
     def _timestep_encode(
         self,
         timestep: torch.Tensor,
@@ -2117,7 +2034,6 @@ class HunyuanImage3ForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         """Get multimodal embeddings from input."""
-        ar_vae_dp_cache_id = self._as_int_cache_id(kwargs.pop("ar_vae_dp_cache_id", None))
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -2136,23 +2052,12 @@ class HunyuanImage3ForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
 
         # VAE encode + patch_embed per image — each cond image is at its own
         # `reso_group` bucket so shapes are ragged across the image-batch dim.
-        cached_vae_tokens = (
-            self._ar_vae_dp_cache.pop(ar_vae_dp_cache_id, None) if ar_vae_dp_cache_id is not None else None
+        vae_token_embeddings = self._vae_token_encode(
+            vae_pixel_values,
+            vae_token_grid_hw,
+            vae_cfg_factor,
+            vae_generator_seed,
         )
-        if cached_vae_tokens is not None and len(vae_pixel_values) == 1:
-            logger.info(
-                "HunyuanImage3 AR VAE DP cache hit: cache_id=%s, token_shape=%s",
-                ar_vae_dp_cache_id,
-                tuple(cached_vae_tokens.shape),
-            )
-            vae_token_embeddings = [cached_vae_tokens]
-        else:
-            vae_token_embeddings = self._vae_token_encode(
-                vae_pixel_values,
-                vae_token_grid_hw,
-                vae_cfg_factor,
-                vae_generator_seed,
-            )
 
         assert vit_embeddings is not None and vit_embeddings.shape[0] == len(vae_token_embeddings), (
             f"Number of ViT embeddings ({vit_embeddings.shape[0]}) does not match "

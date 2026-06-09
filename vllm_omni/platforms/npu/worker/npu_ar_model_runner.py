@@ -78,33 +78,6 @@ class NPUARModelRunner(OmniNPUModelRunner):
         self.kv_transfer_manager = OmniKVTransferManager.from_vllm_config(self.vllm_config, self.model_config)
         self._downstream_payload_cache: dict[str, bool] = {}
 
-    def _maybe_run_mm_batch_preprocess(self, req_ids: list[str], device: torch.device) -> None:
-        """Run an optional model-specific multimodal batch preprocess hook."""
-        preprocess_mm_batch = getattr(self.model, "preprocess_mm_batch", None)
-        if not callable(preprocess_mm_batch):
-            return
-
-        for req_id in req_ids:
-            req_state = self.requests.get(req_id)
-            if req_state is None:
-                continue
-            mm_features = getattr(req_state, "mm_features", None)
-            if not mm_features:
-                continue
-            req_infos = self.model_intermediate_buffer.setdefault(req_id, {})
-            req_infos.setdefault("mm_features", mm_features)
-            req_infos.setdefault("request_id", req_id)
-
-        preprocess_mm_batch(
-            req_ids=req_ids,
-            model_intermediate_buffer=self.model_intermediate_buffer,
-            device=device,
-        )
-
-    def _maybe_run_batch_preprocess(self, req_ids: list[str], device: torch.device) -> None:
-        self._maybe_run_mm_batch_preprocess(req_ids, device)
-        super()._maybe_run_batch_preprocess(req_ids, device)
-
     def _make_buffer(self, *size, dtype, numpy=True):
         # Prevent ray from pinning the buffer due to large size
         from vllm_omni.distributed.ray_utils.utils import (
@@ -368,7 +341,6 @@ class NPUARModelRunner(OmniNPUModelRunner):
                         scheduler_output,
                         encoder_cache=self.encoder_cache,
                     ) as ec_connector_output:
-                        self._maybe_run_mm_batch_preprocess(self.input_batch.req_ids, self.device)
                         self._execute_mm_encoder(scheduler_output)
 
                         kv_ids = self.kv_extracted_req_ids
