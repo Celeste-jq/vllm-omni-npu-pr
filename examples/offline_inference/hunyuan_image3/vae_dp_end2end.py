@@ -385,9 +385,25 @@ def _first_stage_metrics(req_output: Any) -> dict[str, Any]:
     return maybe_metrics if isinstance(maybe_metrics, dict) else {}
 
 
+def _stage_duration_ms(stage_durations: Any, *keys: str) -> float | None:
+    if not isinstance(stage_durations, dict):
+        return None
+    for key in keys:
+        value = stage_durations.get(key)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _benchmark_metrics(outputs: list[Any], *, elapsed_s: float, configuration: str) -> dict[str, Any]:
     ttft_ms: list[float] = []
     tpot_ms: list[float] = []
+    ar_stage_ms: list[float] = []
+    dit_stage_ms: list[float] = []
     total_input_tokens = 0
     total_output_tokens = 0
     non_empty_text_outputs = 0
@@ -422,6 +438,15 @@ def _benchmark_metrics(outputs: list[Any], *, elapsed_s: float, configuration: s
         if tpot_value is not None and tpot_value > 0.0:
             tpot_ms.append(tpot_value)
 
+        stage_durations = getattr(req_output, "stage_durations", {}) or {}
+        ar_ms = _stage_duration_ms(stage_durations, "stage_0_gen_ms", "ar_stage_0_gen_ms")
+        if ar_ms is not None and ar_ms > 0.0:
+            ar_stage_ms.append(ar_ms)
+
+        dit_ms = _stage_duration_ms(stage_durations, "stage_1_gen_ms", "dit_stage_1_gen_ms")
+        if dit_ms is not None and dit_ms > 0.0:
+            dit_stage_ms.append(dit_ms)
+
     total_tokens = total_input_tokens + total_output_tokens
     return {
         "configuration": configuration,
@@ -433,6 +458,8 @@ def _benchmark_metrics(outputs: list[Any], *, elapsed_s: float, configuration: s
         "total_token_throughput": (total_tokens / elapsed_s) if elapsed_s > 0 else 0.0,
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
+        "mean_ar_stage_ms": (sum(ar_stage_ms) / len(ar_stage_ms)) if ar_stage_ms else 0.0,
+        "mean_dit_stage_ms": (sum(dit_stage_ms) / len(dit_stage_ms)) if dit_stage_ms else 0.0,
         "num_requests": len(outputs),
         "non_empty_text_outputs": non_empty_text_outputs,
         "empty_text_outputs": len(outputs) - non_empty_text_outputs,
@@ -448,6 +475,8 @@ def _print_benchmark_metrics(metrics: dict[str, Any]) -> None:
     print(f"  P50 TTFT                : {metrics.get('p50_ttft_ms', 0.0):.3f} ms")
     print(f"  P90 TTFT                : {metrics.get('p90_ttft_ms', 0.0):.3f} ms")
     print(f"  P50 TPOT                : {metrics.get('p50_tpot_ms', 0.0):.3f} ms")
+    print(f"  Mean AR Stage Time      : {metrics.get('mean_ar_stage_ms', 0.0):.3f} ms")
+    print(f"  Mean DiT Stage Time     : {metrics.get('mean_dit_stage_ms', 0.0):.3f} ms")
     print(f"  Total Token Throughput   : {metrics.get('total_token_throughput', 0.0):.3f} tok/s")
     print(
         "  Text Outputs            : "
