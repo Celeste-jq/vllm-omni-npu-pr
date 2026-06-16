@@ -69,10 +69,9 @@ def _init_mc2_group_for_diffusion(
 def _sync_ascend_ep_group_for_diffusion() -> None:
     """Make vllm-ascend use vLLM's EP group for expert placement.
 
-    vllm-omni maps diffusion SP to vLLM PCP and CFG to vLLM DP, so vLLM's
-    FusedMoE computes EP from TP * PCP * DP. vllm-ascend keeps its own
-    parallel-state module, so mirror the vLLM EP group there without changing
-    FusedMoE's tp_size/pcp_size/dp_size inputs.
+    HunyuanImage3 passes diffusion SP/CFG as explicit FusedMoE PCP/DP sizes.
+    vllm-ascend keeps its own parallel-state module, so mirror vLLM's EP group
+    there for the NPU token dispatcher and MC2 setup.
     """
     import vllm_ascend.distributed.parallel_state as vllm_ascend_parallel_state
 

@@ -72,7 +72,7 @@ from vllm_omni.diffusion.distributed.sp_plan import (
     SequenceParallelOutput,
 )
 from vllm_omni.diffusion.distributed.utils import get_local_device
-from vllm_omni.diffusion.forward_context import set_forward_context_denoise_step_idx
+from vllm_omni.diffusion.forward_context import get_forward_context, set_forward_context_denoise_step_idx
 from vllm_omni.diffusion.layers.rope import RotaryEmbedding
 from vllm_omni.diffusion.models.hunyuan_image3.hunyuan_fused_moe import HunyuanFusedMoE
 from vllm_omni.model_executor.layers.timestep_embedding import timestep_embedding
@@ -1563,7 +1563,15 @@ class HunYuanSparseMoeBlock(nn.Module):
         else:
             self.shared_mlp = None
 
-        enable_expert_parallel = get_current_vllm_config().parallel_config.enable_expert_parallel
+        vllm_parallel_config = get_current_vllm_config().parallel_config
+        diffusion_parallel_config = get_forward_context().omni_diffusion_config.parallel_config
+        enable_expert_parallel = vllm_parallel_config.enable_expert_parallel
+        moe_pcp_size = diffusion_parallel_config.sequence_parallel_size if enable_expert_parallel else 1
+        moe_dp_size = (
+            diffusion_parallel_config.data_parallel_size * diffusion_parallel_config.cfg_parallel_size
+            if enable_expert_parallel
+            else diffusion_parallel_config.data_parallel_size
+        )
         self.experts = HunyuanFusedMoE(
             shared_experts=self.shared_mlp,
             num_experts=self.n_routed_experts,
@@ -1575,7 +1583,9 @@ class HunYuanSparseMoeBlock(nn.Module):
             prefix=f"{prefix}.experts",
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
-            pcp_size=None if enable_expert_parallel else 1,
+            tp_size=self.tp_size,
+            pcp_size=moe_pcp_size,
+            dp_size=moe_dp_size,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:

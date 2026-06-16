@@ -784,7 +784,6 @@ def initialize_model_parallel(
     )
     sp_group_ranks = rank_generator.get_ranks("sp")
     od_config: OmniDiffusionConfig | None = get_forward_context().omni_diffusion_config
-    use_moe_parallel_mapping = bool(enable_expert_parallel and od_config and od_config.is_moe)
     global _DP
     assert _DP is None, "data parallel group is already initialized"
     _DP = init_model_parallel_group(
@@ -830,8 +829,6 @@ def initialize_model_parallel(
         ulysses_group=ulysses_pg,
         ring_group=ring_pg,
     )
-    if use_moe_parallel_mapping:
-        vllm_parallel_state._PCP = _SP
 
     assert vllm_parallel_state._TP is None, "Tensor parallel group is already initialized"
     vllm_parallel_state._TP = init_model_parallel_group(
@@ -840,13 +837,6 @@ def initialize_model_parallel(
         backend=backend,
         parallel_mode="tensor",
     )
-    if use_moe_parallel_mapping and cfg_parallel_size > 1:
-        vllm_parallel_state._DP = init_model_parallel_group(
-            group_ranks=rank_generator.get_ranks("cfg-dp"),
-            local_rank=get_world_group().local_rank,
-            backend=backend,
-            parallel_mode="data",
-        )
 
     global _FS
     assert _FS is None, "fully shard group is already initialized"
@@ -858,7 +848,7 @@ def initialize_model_parallel(
     )
 
     if enable_expert_parallel:
-        if use_moe_parallel_mapping:
+        if od_config and od_config.is_moe:
             vllm_parallel_state._EP = init_model_parallel_group(
                 group_ranks=rank_generator.get_ranks("tp-sp-cfg-dp"),
                 local_rank=get_world_group().local_rank,
@@ -875,20 +865,15 @@ def destroy_model_parallel():
     """Set the groups to none and destroy them."""
     global _DP, _CFG, _SP, _PP, _FS
 
-    if vllm_parallel_state._DP and vllm_parallel_state._DP is not _DP:
-        vllm_parallel_state._DP.destroy()
-    vllm_parallel_state._DP = None
-
     if _DP:
         _DP.destroy()
     _DP = None
+    vllm_parallel_state._DP = None
 
     if _CFG:
         _CFG.destroy()
     _CFG = None
 
-    if vllm_parallel_state._PCP and vllm_parallel_state._PCP is not _SP:
-        vllm_parallel_state._PCP.destroy()
     vllm_parallel_state._PCP = None
 
     if _SP:
