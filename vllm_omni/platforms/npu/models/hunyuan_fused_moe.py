@@ -3,6 +3,8 @@
 
 from typing import Any
 
+import logging
+
 import torch
 import vllm.forward_context as _vllm_fc
 from vllm.config import VllmConfig
@@ -21,6 +23,8 @@ from vllm_omni.diffusion.distributed.parallel_state import (
     get_world_group,
 )
 from vllm_omni.diffusion.forward_context import get_forward_context as omni_get_ctx
+
+logger = logging.getLogger(__name__)
 
 
 def _ensure_forward_context_attr(name: str, annotation: Any, default: Any) -> None:
@@ -58,6 +62,14 @@ def _init_mc2_group_for_diffusion(
     all_ranks = torch.arange(world_size).reshape(-1, expert_parallel_size)
     group_ranks = all_ranks.unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
+    logger.info(
+        "HunyuanImage3 NPU MC2 init: world_size=%s expert_parallel_size=%s backend=%s local_rank=%s group_ranks=%s",
+        world_size,
+        expert_parallel_size,
+        backend,
+        local_rank,
+        group_ranks,
+    )
     vllm_ascend_parallel_state._MC2 = vllm_init_model_parallel_group(
         group_ranks,
         local_rank,
@@ -77,6 +89,17 @@ def _sync_ascend_ep_group_for_diffusion() -> None:
 
     omni_ep_group = get_ep_group()
     ascend_ep_group = getattr(vllm_ascend_parallel_state, "_EP", None)
+    logger.info(
+        "HunyuanImage3 NPU EP sync: vllm_ep(size=%s, rank=%s) ascend_ep_before=%s",
+        omni_ep_group.world_size,
+        omni_ep_group.rank_in_group,
+        None
+        if ascend_ep_group is None
+        else {
+            "size": ascend_ep_group.world_size,
+            "rank": ascend_ep_group.rank_in_group,
+        },
+    )
     if ascend_ep_group is not omni_ep_group:
         vllm_ascend_parallel_state._EP = omni_ep_group
 
@@ -109,6 +132,15 @@ def prepare_hunyuan_fused_moe_runtime() -> None:
         expert_parallel_size = dp_size * tp_size
     backend = torch.distributed.get_backend(get_world_group().device_group)
     local_rank = get_world_group().local_rank
+    logger.info(
+        "HunyuanImage3 NPU MoE runtime: world_size=%s tp=%s dp=%s enable_ep=%s ep_size=%s local_rank=%s",
+        world_size,
+        tp_size,
+        dp_size,
+        vllm_config.parallel_config.enable_expert_parallel,
+        expert_parallel_size,
+        local_rank,
+    )
     if vllm_config.parallel_config.enable_expert_parallel:
         _sync_ascend_ep_group_for_diffusion()
     _init_mc2_group_for_diffusion(

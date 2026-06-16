@@ -1572,6 +1572,20 @@ class HunYuanSparseMoeBlock(nn.Module):
             if enable_expert_parallel
             else diffusion_parallel_config.data_parallel_size
         )
+        if layer_id == 0:
+            logger.info(
+                "HunyuanImage3 MoE parallel mapping: prefix=%s enable_ep=%s "
+                "diffusion(tp=%s, sp=%s, cfg=%s, dp=%s) fused_moe(tp=%s, pcp=%s, dp=%s)",
+                prefix,
+                enable_expert_parallel,
+                diffusion_parallel_config.tensor_parallel_size,
+                diffusion_parallel_config.sequence_parallel_size,
+                diffusion_parallel_config.cfg_parallel_size,
+                diffusion_parallel_config.data_parallel_size,
+                self.tp_size,
+                moe_pcp_size,
+                moe_dp_size,
+            )
         self.experts = HunyuanFusedMoE(
             shared_experts=self.shared_mlp,
             num_experts=self.n_routed_experts,
