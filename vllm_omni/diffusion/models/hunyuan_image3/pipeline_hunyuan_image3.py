@@ -21,6 +21,9 @@ from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 from vllm.transformers_utils.config import get_config
 
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
+from vllm_omni.diffusion.distributed.autoencoders.autoencoder_kl_hunyuan import (
+    DistributedAutoencoderKLHunyuan,
+)
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
 from vllm_omni.diffusion.models.interface import SupportImageInput
@@ -31,7 +34,6 @@ from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.inputs.data import OmniTextPrompt
 from vllm_omni.model_executor.models.hunyuan_image3.siglip2 import Siglip2VisionTransformer
 
-from .autoencoder import AutoencoderKLConv3D
 from .hunyuan_image3_tokenizer import TokenizerWrapper
 from .hunyuan_image3_transformer import (
     CausalMMOutputWithPast,
@@ -347,8 +349,7 @@ class HunyuanImage3Pipeline(
         )
         self.model = HunyuanImage3Model(self.hf_config, quant_config=quant_config)
         self.transformer = self.model
-        self.vae = AutoencoderKLConv3D.from_config(self.hf_config.vae)
-        self.vae.use_spatial_tiling = self.od_config.vae_use_tiling
+        self.vae = DistributedAutoencoderKLHunyuan.from_config(self.hf_config.vae)
         self._pipeline = None
         self._tkwrapper = TokenizerWrapper(od_config.model)
         self.image_processor = HunyuanImage3ImageProcessor(self.hf_config)
