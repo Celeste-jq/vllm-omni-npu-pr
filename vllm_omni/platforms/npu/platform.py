@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from contextlib import nullcontext
 from typing import Any
 
@@ -62,6 +63,9 @@ class NPUOmniPlatform(OmniPlatform, NPUPlatform):
     @classmethod
     def get_diffusion_model_impl_qualname(cls, op_name: str) -> str:
         if op_name == "hunyuan_fused_moe":
+            backend = os.environ.get("VLLM_OMNI_HUNYUAN_MOE_BACKEND", "").strip().lower()
+            if backend == "mindiesd":
+                return "vllm_omni.platforms.npu.models.hunyuan_fused_moe.MindIESDHunyuanFusedMoE"
             return "vllm_omni.platforms.npu.models.hunyuan_fused_moe.AscendHunyuanFusedMoE"
         return super().get_diffusion_model_impl_qualname(op_name)
 

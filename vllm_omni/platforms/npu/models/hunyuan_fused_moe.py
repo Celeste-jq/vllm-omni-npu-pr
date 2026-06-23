@@ -4,12 +4,17 @@
 from typing import Any
 
 import torch
+import torch.nn as nn
 import vllm.forward_context as _vllm_fc
 from vllm.config import VllmConfig
-from vllm.distributed import get_ep_group
-from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_world_size,
+    get_tp_group,
     init_model_parallel_group as vllm_init_model_parallel_group,
+)
+from vllm.distributed import get_ep_group
+from vllm.model_executor.layers.fused_moe import (
+    fused_moe_make_expert_params_mapping,
 )
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
@@ -122,3 +127,179 @@ class AscendHunyuanFusedMoE(AscendFusedMoE):
         if vllm_ascend_parallel_state._MC2:
             vllm_ascend_parallel_state._MC2.destroy()
         vllm_ascend_parallel_state._MC2 = None
+
+
+class MindIESDHunyuanFusedMoE(nn.Module):
+    def __init__(
+        self,
+        *,
+        prefix: str = "",
+        shared_experts: nn.Module | None = None,
+        num_experts: int,
+        top_k: int,
+        hidden_size: int,
+        intermediate_size: int,
+        renormalize: bool = False,
+        quant_config: Any | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__()
+        if quant_config is not None:
+            raise NotImplementedError("MindIE-SD Hunyuan MoE adapter currently supports non-quantized weights only.")
+        self._prefix = prefix
+        self.shared_experts = shared_experts
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.renormalize = renormalize
+        self.custom_routing_function = kwargs.get("custom_routing_function")
+        ep_group = get_ep_group()
+        self.ep_size = getattr(ep_group, "world_size", 1)
+        self.ep_rank = getattr(ep_group, "rank_in_group", 0)
+        if num_experts % self.ep_size != 0:
+            raise ValueError(f"num_experts={num_experts} must be divisible by ep_size={self.ep_size}.")
+        self.local_num_experts = num_experts // self.ep_size
+        self.local_expert_start = self.ep_rank * self.local_num_experts
+        self.w13_weight = nn.Parameter(torch.empty(self.local_num_experts, hidden_size, 2 * intermediate_size))
+        self.w2_weight = nn.Parameter(torch.empty(self.local_num_experts, intermediate_size, hidden_size))
+        self.w13_weight.weight_loader = self._load_w13_weight
+        self.w2_weight.weight_loader = self._load_w2_weight
+
+    @staticmethod
+    def make_expert_params_mapping(
+        model: Any,
+        ckpt_gate_proj_name: str,
+        ckpt_down_proj_name: str,
+        ckpt_up_proj_name: str,
+        num_experts: int,
+        num_redundant_experts: int = 0,
+    ) -> list[tuple[str, str, int, str]]:
+        return fused_moe_make_expert_params_mapping(
+            model,
+            ckpt_gate_proj_name=ckpt_gate_proj_name,
+            ckpt_down_proj_name=ckpt_down_proj_name,
+            ckpt_up_proj_name=ckpt_up_proj_name,
+            num_experts=num_experts,
+            num_redundant_experts=num_redundant_experts,
+        )
+
+    def _local_expert_id(self, expert_id: int | None) -> int | None:
+        if expert_id is None:
+            return None
+        local_id = expert_id - self.local_expert_start
+        if local_id < 0 or local_id >= self.local_num_experts:
+            return None
+        return local_id
+
+    @staticmethod
+    def _copy_weight(target: Any, loaded_weight: Any) -> None:
+        if loaded_weight.shape != target.shape and len(loaded_weight.shape) == 2:
+            loaded_weight = loaded_weight.t()
+        target.copy_(loaded_weight)
+
+    @staticmethod
+    def _w13_shard_start(shard_id: Any, half_intermediate: int) -> int:
+        if shard_id in (0, "w1", "gate", "gate_proj"):
+            return 0
+        if shard_id in (1, "w3", "up", "up_proj"):
+            return half_intermediate
+        raise ValueError(f"Unsupported Hunyuan MoE w13 shard_id: {shard_id!r}.")
+
+    def _load_w13_weight(
+        self,
+        param: Any,
+        loaded_weight: Any,
+        weight_name: str | None = None,
+        *,
+        shard_id: Any = None,
+        expert_id: int | None = None,
+        return_success: bool = False,
+    ) -> bool | None:
+        local_id = self._local_expert_id(expert_id)
+        if local_id is None:
+            if return_success:
+                return False
+            return None
+
+        if loaded_weight.shape[-1] == param.shape[2]:
+            self._copy_weight(param.data[local_id], loaded_weight)
+        else:
+            half_intermediate = param.shape[2] // 2
+            start = self._w13_shard_start(shard_id, half_intermediate)
+            self._copy_weight(param.data[local_id, :, start : start + half_intermediate], loaded_weight)
+        if return_success:
+            return True
+        return None
+
+    def _load_w2_weight(
+        self,
+        param: Any,
+        loaded_weight: Any,
+        weight_name: str | None = None,
+        *,
+        shard_id: Any = None,
+        expert_id: int | None = None,
+        return_success: bool = False,
+    ) -> bool | None:
+        local_id = self._local_expert_id(expert_id)
+        if local_id is None:
+            if return_success:
+                return False
+            return None
+        self._copy_weight(param.data[local_id], loaded_weight)
+        if return_success:
+            return True
+        return None
+
+    @staticmethod
+    def _device_group(group: Any) -> Any:
+        return getattr(group, "device_group", group)
+
+    def _load_mindiesd_fused_moe(self) -> Any:
+        try:
+            from mindiesd.layers.fused_moe import fused_moe
+        except ImportError as exc:
+            raise ImportError(
+                "MindIE-SD Hunyuan MoE backend requires the 'mindiesd' package. "
+                "Install MindIE-SD or unset VLLM_OMNI_HUNYUAN_MOE_BACKEND."
+            ) from exc
+        return fused_moe
+
+    @staticmethod
+    def _fp32_topk_routing(
+        hidden_states: torch.Tensor,
+        gating_output: torch.Tensor,
+        topk: int,
+        renormalize: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        del hidden_states
+        gates = torch.softmax(gating_output.float(), dim=-1, dtype=torch.float32)
+        topk_weights, topk_indices = torch.topk(gates, topk, dim=-1)
+        if renormalize:
+            weight_sums = topk_weights.sum(dim=-1, keepdim=True)
+            topk_weights = topk_weights / weight_sums.clamp(min=1e-8)
+        return topk_weights.to(torch.float32), topk_indices.to(torch.int32)
+
+    def forward(self, hidden_states: Any, router_logits: Any) -> Any:
+        _set_hunyuan_fused_moe_forward_context(hidden_states.shape[0])
+        fused_moe = self._load_mindiesd_fused_moe()
+        tp_group = self._device_group(get_tp_group())
+        ep_group_obj = get_ep_group()
+        ep_group = self._device_group(ep_group_obj) if getattr(ep_group_obj, "world_size", 1) > 1 else None
+        routing_function = self.custom_routing_function or self._fp32_topk_routing
+        output = fused_moe(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            num_experts=self.num_experts,
+            top_k=self.top_k,
+            w13_weight=self.w13_weight,
+            w2_weight=self.w2_weight,
+            tp_group=tp_group,
+            ep_group=ep_group,
+            tokens_full=True,
+            renormalize=self.renormalize,
+            custom_routing_function=routing_function,
+            reduce_results=True,
+        )
+        if self.shared_experts is not None:
+            output = output + self.shared_experts(hidden_states)
+        return output
