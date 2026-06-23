@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import os
+import time
 
 from vllm_omni.diffusion.models.hunyuan_image3.prompt_utils import (
     build_prompt_tokens,
@@ -107,6 +108,11 @@ def parse_args():
     # Omni init args
     parser.add_argument("--stage-configs-path", type=str, default=None, help="Custom stage config YAML path.")
     parser.add_argument("--log-stats", action="store_true", default=False)
+    parser.add_argument(
+        "--profile-e2e",
+        action="store_true",
+        help="Print wall-clock timings for end-to-end script phases.",
+    )
     parser.add_argument("--init-timeout", type=int, default=300, help="Initialization timeout in seconds.")
     parser.add_argument("--enforce-eager", action="store_true", help="Disable torch.compile.")
 
@@ -117,6 +123,17 @@ def parse_args():
 
 
 def main():
+    script_start = time.perf_counter()
+    phase_start = script_start
+
+    def record_phase(name: str) -> None:
+        nonlocal phase_start
+        if not args.profile_e2e:
+            return
+        now = time.perf_counter()
+        print(f"[E2E Profile] {name}: {(now - phase_start) * 1000:.2f} ms")
+        phase_start = now
+
     args = parse_args()
     os.makedirs(args.output, exist_ok=True)
 
@@ -139,6 +156,7 @@ def main():
         omni_kwargs["mode"] = "text-to-image"
 
     omni = Omni(**omni_kwargs)
+    record_phase("omni_init")
 
     # Prepare prompts
     prompts = args.prompts or ["A cute cat"]
@@ -160,6 +178,7 @@ def main():
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    record_phase("tokenizer_load")
 
     # Format prompts
     formatted_prompts: list[OmniPromptType] = []
@@ -192,6 +211,7 @@ def main():
             prompt_dict["modalities"] = ["text"]
 
         formatted_prompts.append(prompt_dict)
+    record_phase("prompt_format")
 
     # Build sampling params from defaults
     params_list = list(omni.default_sampling_params_list)
@@ -229,6 +249,7 @@ def main():
 
     # Generate
     omni_outputs = list(omni.generate(prompts=formatted_prompts, sampling_params_list=params_list))
+    record_phase("omni_generate")
 
     # Process outputs
     img_idx = 0
@@ -251,6 +272,10 @@ def main():
                 img.save(save_path)
                 print(f"[Output] Saved image to {save_path}")
             img_idx += 1
+    record_phase("output_process")
+    if args.profile_e2e:
+        total = (time.perf_counter() - script_start) * 1000
+        print(f"[E2E Profile] total: {total:.2f} ms")
 
 
 if __name__ == "__main__":
