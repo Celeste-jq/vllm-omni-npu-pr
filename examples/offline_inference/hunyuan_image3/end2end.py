@@ -113,6 +113,11 @@ def parse_args():
         action="store_true",
         help="Print wall-clock timings for end-to-end script phases.",
     )
+    parser.add_argument(
+        "--profile-diffusion-pipeline",
+        action="store_true",
+        help="Print diffusion pipeline timings for selected internal methods.",
+    )
     parser.add_argument("--init-timeout", type=int, default=300, help="Initialization timeout in seconds.")
     parser.add_argument("--enforce-eager", action="store_true", help="Disable torch.compile.")
 
@@ -151,6 +156,7 @@ def main():
         "log_stats": args.log_stats,
         "init_timeout": args.init_timeout,
         "enforce_eager": args.enforce_eager,
+        "enable_diffusion_pipeline_profiler": args.profile_diffusion_pipeline,
     }
     if args.modality in ("text2img", "img2img"):
         omni_kwargs["mode"] = "text-to-image"
@@ -260,6 +266,12 @@ def main():
             txt = "".join(getattr(o, "text", "") or "" for o in ro.outputs)
             if txt:
                 print(f"[Output] Text:\n{txt}")
+
+        stage_durations = getattr(req_output, "stage_durations", None)
+        if args.profile_diffusion_pipeline and stage_durations:
+            print("[Diffusion Pipeline Profile]")
+            for name, duration in sorted(stage_durations.items()):
+                print(f"  {name}: {duration * 1000:.2f} ms")
 
         # Image output (DiT stage)
         images = getattr(req_output, "images", None)

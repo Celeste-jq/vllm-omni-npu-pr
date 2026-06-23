@@ -804,6 +804,11 @@ class HunyuanImage3Pipeline(
         bot_task = kwargs.pop("bot_task", "auto")
         # If `drop_think` enabled, always drop <think> parts in the context.
         drop_think = kwargs.get("drop_think", self.generation_config.drop_think)
+        # Pull sequence_template from the model's generation_config so the DiT
+        # text prefix matches how the model was trained (Instruct for the
+        # HunyuanImage-3.0-Instruct checkpoint). Falling back to "pretrain"
+        # only if the config does not specify it.
+        sequence_template = getattr(self.generation_config, "sequence_template", "pretrain")
         # Apply batched prompt or batched message_list to build input sequence with associated info.
         out = self._tkwrapper.apply_chat_template(
             batch_prompt=batch_prompt,
@@ -816,7 +821,7 @@ class HunyuanImage3Pipeline(
             max_length=kwargs.get("max_length"),
             bot_task=bot_task,
             image_base_size=self.config.image_base_size,
-            sequence_template="pretrain",
+            sequence_template=sequence_template,
             cfg_factor=cfg_factor[mode],
             drop_think=drop_think,
         )
