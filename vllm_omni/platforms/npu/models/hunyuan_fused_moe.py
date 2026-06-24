@@ -12,7 +12,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
     init_model_parallel_group as vllm_init_model_parallel_group,
 )
-from vllm.distributed import get_ep_group
+from vllm.distributed import get_ep_group, tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -301,5 +301,7 @@ class MindIESDHunyuanFusedMoE(nn.Module):
             reduce_results=True,
         )
         if self.shared_experts is not None:
-            output = output + self.shared_experts(hidden_states)
+            shared_output = self.shared_experts(hidden_states)
+            shared_output = tensor_model_parallel_all_reduce(shared_output)
+            output = output + shared_output
         return output
