@@ -151,7 +151,6 @@ class MindIESDHunyuanFusedMoE(nn.Module):
         self.num_experts = num_experts
         self.top_k = top_k
         self.renormalize = renormalize
-        self.custom_routing_function = kwargs.get("custom_routing_function")
         ep_group = get_ep_group()
         self.ep_size = getattr(ep_group, "world_size", 1)
         self.ep_rank = getattr(ep_group, "rank_in_group", 0)
@@ -264,28 +263,12 @@ class MindIESDHunyuanFusedMoE(nn.Module):
             ) from exc
         return fused_moe
 
-    @staticmethod
-    def _fp32_topk_routing(
-        hidden_states: torch.Tensor,
-        gating_output: torch.Tensor,
-        topk: int,
-        renormalize: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        del hidden_states
-        gates = torch.softmax(gating_output.float(), dim=-1, dtype=torch.float32)
-        topk_weights, topk_indices = torch.topk(gates, topk, dim=-1)
-        if renormalize:
-            weight_sums = topk_weights.sum(dim=-1, keepdim=True)
-            topk_weights = topk_weights / weight_sums.clamp(min=1e-8)
-        return topk_weights.to(torch.float32), topk_indices.to(torch.int32)
-
     def forward(self, hidden_states: Any, router_logits: Any) -> Any:
         _set_hunyuan_fused_moe_forward_context(hidden_states.shape[0])
         fused_moe = self._load_mindiesd_fused_moe()
         tp_group = self._device_group(get_tp_group())
         ep_group_obj = get_ep_group()
         ep_group = self._device_group(ep_group_obj) if getattr(ep_group_obj, "world_size", 1) > 1 else None
-        routing_function = self.custom_routing_function or self._fp32_topk_routing
         output = fused_moe(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -297,7 +280,6 @@ class MindIESDHunyuanFusedMoE(nn.Module):
             ep_group=ep_group,
             tokens_full=True,
             renormalize=self.renormalize,
-            custom_routing_function=routing_function,
             reduce_results=True,
         )
         if self.shared_experts is not None:
