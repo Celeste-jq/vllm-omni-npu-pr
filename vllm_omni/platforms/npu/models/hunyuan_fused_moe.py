@@ -163,6 +163,7 @@ class MindIESDHunyuanFusedMoE(nn.Module):
         self.w2_weight = nn.Parameter(torch.empty(self.local_num_experts, intermediate_size, hidden_size))
         self.w13_weight.weight_loader = self._load_w13_weight
         self.w2_weight.weight_loader = self._load_w2_weight
+        self._shared_expert_stream: Any | None = None
 
     @staticmethod
     def make_expert_params_mapping(
@@ -271,6 +272,22 @@ class MindIESDHunyuanFusedMoE(nn.Module):
             ) from exc
         return fused_moe
 
+    def _get_shared_expert_stream(self) -> Any:
+        if self._shared_expert_stream is None:
+            self._shared_expert_stream = torch.npu.Stream()
+        return self._shared_expert_stream
+
+    def _forward_shared_experts_async(self, hidden_states: Any) -> Any:
+        if self.shared_experts is None:
+            return None
+
+        current_stream = torch.npu.current_stream()
+        shared_stream = self._get_shared_expert_stream()
+        shared_stream.wait_stream(current_stream)
+        with torch.npu.stream(shared_stream):
+            shared_output = self.shared_experts(hidden_states)
+            return tensor_model_parallel_all_reduce(shared_output)
+
     def forward(self, hidden_states: Any, router_logits: Any) -> Any:
         _set_hunyuan_fused_moe_forward_context(hidden_states.shape[0])
         fused_moe = self._load_mindiesd_fused_moe()
@@ -278,6 +295,7 @@ class MindIESDHunyuanFusedMoE(nn.Module):
         ep_group_obj = get_ep_group()
         ep_group = self._device_group(ep_group_obj) if getattr(ep_group_obj, "world_size", 1) > 1 else None
         sp_enabled = self._get_sp_size() > 1
+        shared_output = self._forward_shared_experts_async(hidden_states)
         output = fused_moe(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -290,10 +308,9 @@ class MindIESDHunyuanFusedMoE(nn.Module):
             tokens_full=not sp_enabled,
             renormalize=self.renormalize,
             reduce_results=True,
-            dispatcher_type="static" if sp_enabled else None,
+            dispatcher_type=None,
         )
-        if self.shared_experts is not None:
-            shared_output = self.shared_experts(hidden_states)
-            shared_output = tensor_model_parallel_all_reduce(shared_output)
+        if shared_output is not None:
+            torch.npu.current_stream().wait_stream(self._get_shared_expert_stream())
             output = output + shared_output
         return output
