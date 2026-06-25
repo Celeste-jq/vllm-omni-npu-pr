@@ -23,6 +23,9 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 from vllm_omni.diffusion.distributed.parallel_state import (
     get_data_parallel_world_size,
+    get_sequence_parallel_rank,
+    get_sequence_parallel_world_size,
+    get_sp_group,
     get_world_group,
 )
 from vllm_omni.diffusion.forward_context import get_forward_context as omni_get_ctx
@@ -253,6 +256,26 @@ class MindIESDHunyuanFusedMoE(nn.Module):
     def _device_group(group: Any) -> Any:
         return getattr(group, "device_group", group)
 
+    @staticmethod
+    def _get_sp_state() -> tuple[int, int, Any | None]:
+        try:
+            sp_size = get_sequence_parallel_world_size()
+        except AssertionError:
+            return 1, 0, None
+        if sp_size <= 1:
+            return 1, 0, None
+        sp_group = get_sp_group()
+        return sp_size, get_sequence_parallel_rank(), sp_group
+
+    @staticmethod
+    def _all_gather_sp_tokens(tensor: Any, sp_group: Any) -> Any:
+        return sp_group.all_gather(tensor, dim=0)
+
+    @staticmethod
+    def _select_sp_token_shard(tensor: Any, sp_rank: int, local_num_tokens: int) -> Any:
+        start = sp_rank * local_num_tokens
+        return tensor.narrow(0, start, local_num_tokens).contiguous()
+
     def _load_mindiesd_fused_moe(self) -> Any:
         try:
             from mindiesd.layers.fused_moe import fused_moe
@@ -269,6 +292,11 @@ class MindIESDHunyuanFusedMoE(nn.Module):
         tp_group = self._device_group(get_tp_group())
         ep_group_obj = get_ep_group()
         ep_group = self._device_group(ep_group_obj) if getattr(ep_group_obj, "world_size", 1) > 1 else None
+        sp_size, sp_rank, sp_group = self._get_sp_state()
+        local_num_tokens = hidden_states.shape[0]
+        if sp_size > 1:
+            hidden_states = self._all_gather_sp_tokens(hidden_states, sp_group)
+            router_logits = self._all_gather_sp_tokens(router_logits, sp_group)
         output = fused_moe(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -281,9 +309,12 @@ class MindIESDHunyuanFusedMoE(nn.Module):
             tokens_full=True,
             renormalize=self.renormalize,
             reduce_results=True,
+            dispatcher_type="static" if sp_size > 1 else None,
         )
         if self.shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
             shared_output = tensor_model_parallel_all_reduce(shared_output)
             output = output + shared_output
+        if sp_size > 1:
+            output = self._select_sp_token_shard(output, sp_rank, local_num_tokens)
         return output
