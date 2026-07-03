@@ -524,11 +524,11 @@ class TestAr2DiffusionIntegration:
         self,
         token_ids: list[int],
         prompt_kwargs: dict[str, Any] | None = None,
-    ) -> dict[str, Any] | None:
+    ) -> tuple[Any, Any]:
         """Invoke ``ar2diffusion`` with a single fake AR output.
 
-        Returns the diffusion request payload so callers can assert on the
-        resolved height/width.
+        Returns ``(diffusion_inputs, ar_predicted_sizes)`` so callers can
+        assert on the resolved height/width.
         """
         from vllm_omni.model_executor.stage_input_processors.hunyuan_image3 import (
             ar2diffusion,
@@ -601,8 +601,8 @@ class TestAr2DiffusionIntegration:
             token_ids=[150000, 150001, token_id],
             prompt_kwargs={"height": 1024, "width": 1024, "image_base_size": 1024},
         )
-        assert result is not None
-        diffusion_input = result
+        assert len(result) == 1
+        diffusion_input = result[0]
         assert diffusion_input["height"] == expected_h, (
             f"ratio_idx={ratio_idx}: expected height {expected_h}, got {diffusion_input['height']}"
         )
@@ -617,8 +617,8 @@ class TestAr2DiffusionIntegration:
             token_ids=[150000, 150001],  # no ratio tokens
             prompt_kwargs={"height": 768, "width": 1024, "image_base_size": 1024},
         )
-        assert result is not None
-        diffusion_input = result
+        assert len(result) == 1
+        diffusion_input = result[0]
         assert diffusion_input["height"] == 768
         assert diffusion_input["width"] == 1024
 
@@ -633,9 +633,9 @@ class TestAr2DiffusionIntegration:
                 token_ids=[150000],
                 prompt_kwargs={"height": 512, "width": 512, "image_base_size": 1024},
             )
-        assert result is not None
-        assert result["height"] == 512
-        assert result["width"] == 512
+        assert len(result) == 1
+        assert result[0]["height"] == 512
+        assert result[0]["width"] == 512
 
     # -- cache behaviour -----------------------------------------------------
 
